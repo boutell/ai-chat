@@ -1,0 +1,34 @@
+{
+  "name": "ai-chat",
+  "version": "1.0.0",
+  "description": "Local-first AI chatbot powered by ollama with a Vue 3 + Vuetify frontend",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && node --watch app.js",
+    "dev:client": "cd client && npx vite",
+    "install:all": "cd server && npm install && cd ../client && npm install",
+    "test": "cd server && npm test",
+    "test:e2e": "npx playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boutell/ai-chat.git"
+  },
+  "keywords": [
+    "ai",
+    "chat",
+    "llm",
+    "ollama"
+  ],
+  "author": "Thomas Boutell (tom@apostrophecms.com)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/boutell/ai-chat/issues"
+  },
+  "homepage": "https://github.com/boutell/ai-chat#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "concurrently": "^9.1.0"
+  }
+}

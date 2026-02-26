@@ -1,0 +1,30 @@
+The goal here is a web-based AI chatbot, powered exclusively by local models, but with functionality similar to mainstream AI           
+  chatbots. That means:                                                                                                                   
+                                                                                                                                          
+  * built on vuetify & vue 3 & nodejs express & sqlite for simplicity & maintainability                                                   
+  * ollama-based interaction with a local model                                                                                           
+  * local models should be mistral-small-3.1 on better hardware (macbook pro 32GB RAM), ministral on                                      
+  lesser hardware, scaling up to higher mistral models on unusually advanced hardware                                                     
+  * local model selection is automatic, initially based on a rough GPU performance and RAM check,                                         
+  then when it downloads the initial model it should iterate on a speed check until it hits                                               
+  acceptable conversational speed                                                                                                         
+  * advanced mode model selector available for those who don't want to trust the autodetection                                            
+  * Auto-compaction                                                                                                                       
+  * History of past chats                                                                                                                 
+  * Optional organization of chats into projects                                                                                          
+  * Ability to move an existing chat into a project                                                                                       
+  * User-editable memory of facts the bot was asked to remember across chats                                                              
+  * Tool to search past chats                                                                                                             
+  * Web search tool (if API account available)                                                                                            
+  * Help UI covering how to use all this                                                                                                  
+  * Awareness of current time, date, month, year specifically                                                                             
+  * Image upload support, when the model supports it (through ollama)                                                                     
+  * PDF, Excel, etc. upload support                                                                                                       
+  * "Playground" for experiencing one-page web apps built by the model                                                                    
+  * Ability to run model-generated scripts and code for better answers, inside a container (if docker or podman CLI is available          
+  on the host)                                                                                                                            
+  * Ability to remotely control a web browser, again inside a container (if docker or podman CLI is available on the host)                
+  * Image generation support, when the hardware is adequate and models available through ollama support it                                
+  * Support for "preferences" (a user-edited portion of the system prompt)                                                                
+  * Support for skills                                                                                                                    
+  * Display of token use relative to token budget    
