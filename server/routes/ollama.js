@@ -44,8 +44,8 @@ router.post('/auto-select', async (req, res) => {
 
 // Manual model selection
 router.post('/select', (req, res) => {
-  const { model } = req.body;
-  if (!model) return res.status(400).json({ error: 'Model name is required' });
+  const model = req.body.model;
+  if (!model || typeof model !== 'string') return res.status(400).json({ error: 'Model name must be a non-empty string' });
   setSelectedModel(model);
   res.json({ selectedModel: model });
 });

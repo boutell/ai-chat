@@ -12,7 +12,8 @@ router.get('/', (req, res) => {
 
 // Create a new chat
 router.post('/', (req, res) => {
-  const { title } = req.body;
+  const title = req.body.title;
+  if (title != null && typeof title !== 'string') return res.status(400).json({ error: 'Title must be a string' });
   const result = db.prepare('INSERT INTO chats (title) VALUES (?)').run(title || 'New Chat');
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(result.lastInsertRowid);
   res.status(201).json(chat);
@@ -35,8 +36,8 @@ router.delete('/:id', (req, res) => {
 
 // Update chat title
 router.patch('/:id', (req, res) => {
-  const { title } = req.body;
-  if (!title) return res.status(400).json({ error: 'Title is required' });
+  const title = req.body.title;
+  if (!title || typeof title !== 'string') return res.status(400).json({ error: 'Title must be a non-empty string' });
   db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(title, req.params.id);
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(req.params.id);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
@@ -48,8 +49,8 @@ router.post('/:id/messages', async (req, res) => {
   const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(req.params.id);
   if (!chat) return res.status(404).json({ error: 'Chat not found' });
 
-  const { content } = req.body;
-  if (!content) return res.status(400).json({ error: 'Content is required' });
+  const content = req.body.content;
+  if (!content || typeof content !== 'string') return res.status(400).json({ error: 'Content must be a non-empty string' });
 
   // Save user message
   db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content);
