@@ -1,22 +1,26 @@
-const express = require('express');
-const cors = require('cors');
-const chatsRouter = require('./routes/chats');
-const ollamaRouter = require('./routes/ollama');
+const Fastify = require('fastify');
+const cors = require('@fastify/cors');
+const chatsPlugin = require('./routes/chats');
+const ollamaPlugin = require('./routes/ollama');
 
-const app = express();
+async function buildApp() {
+  const fastify = Fastify();
 
-app.use(cors());
-app.use(express.json());
+  await fastify.register(cors);
+  await fastify.register(chatsPlugin, { prefix: '/api/chats' });
+  await fastify.register(ollamaPlugin, { prefix: '/api/models' });
 
-app.use('/api/chats', chatsRouter);
-app.use('/api/models', ollamaRouter);
+  return fastify;
+}
 
 // Start server only when run directly
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  buildApp().then(app => {
+    app.listen({ port: PORT }, () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
   });
 }
 
-module.exports = app;
+module.exports = buildApp;

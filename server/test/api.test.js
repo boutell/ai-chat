@@ -3,12 +3,13 @@ process.env.AI_CHAT_DB = ':memory:';
 
 const assert = require('assert');
 const supertest = require('supertest');
-const app = require('../app');
+const buildApp = require('../app');
 const db = require('../db');
 const { MODEL_TIERS, getSystemRamGB } = require('../lib/model-selector');
 const { OLLAMA_BASE } = require('../lib/ollama');
 
-const request = supertest(app);
+let app;
+let request;
 
 // Probe ollama once at startup
 let ollamaAvailable = false;
@@ -17,6 +18,10 @@ let testModel = null;
 
 before(async function () {
   this.timeout(10000);
+  app = await buildApp();
+  await app.ready();
+  request = supertest(app.server);
+
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/tags`);
     if (res.ok) {
@@ -38,6 +43,10 @@ before(async function () {
   } else {
     console.log(`  ✓ ollama available, using model: ${testModel}`);
   }
+});
+
+after(async function () {
+  if (app) await app.close();
 });
 
 // Helper: mock global.fetch (only used for failure-scenario tests)
