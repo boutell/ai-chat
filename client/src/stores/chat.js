@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
+import { get, post, del, postStream } from '../api.js';
 
 export const useChatStore = defineStore('chat', () => {
   const chats = ref([]);
@@ -11,24 +12,17 @@ export const useChatStore = defineStore('chat', () => {
   const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
 
   async function fetchChats() {
-    const res = await fetch('/api/chats');
-    chats.value = await res.json();
+    chats.value = await get('/api/chats');
   }
 
   async function loadChat(id) {
     currentChatId.value = id;
-    const res = await fetch(`/api/chats/${id}`);
-    const data = await res.json();
+    const data = await get(`/api/chats/${id}`);
     currentMessages.value = data.messages || [];
   }
 
   async function createChat() {
-    const res = await fetch('/api/chats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    const chat = await res.json();
+    const chat = await post('/api/chats');
     chats.value.unshift(chat);
     currentChatId.value = chat.id;
     currentMessages.value = [];
@@ -36,7 +30,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function deleteChat(id) {
-    await fetch(`/api/chats/${id}`, { method: 'DELETE' });
+    await del(`/api/chats/${id}`);
     chats.value = chats.value.filter(c => c.id !== id);
     if (currentChatId.value === id) {
       currentChatId.value = null;
@@ -59,12 +53,7 @@ export const useChatStore = defineStore('chat', () => {
     streaming.value = true;
 
     try {
-      const res = await fetch(`/api/chats/${currentChatId.value}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content })
-      });
-
+      const res = await postStream(`/api/chats/${currentChatId.value}/messages`, { content });
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -82,7 +71,6 @@ export const useChatStore = defineStore('chat', () => {
             const data = line.slice(6);
             if (data === '[DONE]') {
               streaming.value = false;
-              // Refresh chat list to get updated title
               fetchChats();
               return;
             }
@@ -95,7 +83,7 @@ export const useChatStore = defineStore('chat', () => {
                 assistantMsg.content += `\n\n**Error:** ${json.error}`;
               }
             } catch {
-              // skip
+              // skip malformed SSE
             }
           }
         }
@@ -109,8 +97,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function fetchModelStatus() {
     try {
-      const res = await fetch('/api/models/status');
-      modelStatus.value = await res.json();
+      modelStatus.value = await get('/api/models/status');
     } catch {
       modelStatus.value = { selectedModel: null, ollamaConnected: false, available: [] };
     }
@@ -118,12 +105,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function autoSelectModel() {
     try {
-      const res = await fetch('/api/models/auto-select', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) {
-        console.warn('Auto-select failed:', data.error);
-        return data;
-      }
+      const data = await post('/api/models/auto-select');
       await fetchModelStatus();
       return data;
     } catch (err) {

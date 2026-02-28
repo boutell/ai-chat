@@ -1,7 +1,6 @@
 const { execSync } = require('child_process');
 const db = require('../db');
-
-const OLLAMA_BASE = process.env.OLLAMA_URL || 'http://localhost:11434';
+const { ollamaGet, ollamaPost } = require('./ollama');
 
 // Models ordered by quality/size. The selector picks the best one
 // that's feasible for the detected RAM.
@@ -38,42 +37,27 @@ function setSelectedModel(model) {
 }
 
 async function listModels() {
-  const res = await fetch(`${OLLAMA_BASE}/api/tags`);
-  if (!res.ok) throw new Error('Could not reach ollama');
-  const data = await res.json();
+  const data = await ollamaGet('/api/tags');
   return data.models || [];
 }
 
 async function pullModel(model) {
-  const res = await fetch(`${OLLAMA_BASE}/api/pull`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: model, stream: false })
-  });
-  if (!res.ok) throw new Error(`Failed to pull model ${model}`);
-  return res.json();
+  return ollamaPost('/api/pull', { name: model, stream: false });
 }
 
 async function speedTest(model) {
   const start = Date.now();
-  const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: 'Say hello in one sentence.' }],
-      stream: false
-    })
+  const data = await ollamaPost('/api/chat', {
+    model,
+    messages: [{ role: 'user', content: 'Say hello in one sentence.' }],
+    stream: false
   });
-  if (!res.ok) throw new Error(`Speed test failed for ${model}`);
-  const data = await res.json();
   const elapsed = (Date.now() - start) / 1000;
   const tokens = data.eval_count || 20;
   return { tokensPerSecond: tokens / elapsed, elapsed, tokens };
 }
 
 function isModelAvailable(modelNames, candidate) {
-  // Check both with and without tag suffix
   const base = candidate.split(':')[0];
   return modelNames.some(n => n === candidate || n.split(':')[0] === base);
 }
@@ -86,7 +70,6 @@ async function autoSelect() {
   // Build ordered candidate list: preferred tier model first, then fallbacks
   const tier = MODEL_TIERS.find(t => ramGB >= t.minRam);
   const candidates = [tier.model];
-  // Add smaller models as fallbacks (in tier order, deduplicated)
   for (const t of MODEL_TIERS) {
     if (!candidates.includes(t.model)) {
       candidates.push(t.model);
@@ -95,12 +78,10 @@ async function autoSelect() {
 
   for (const candidate of candidates) {
     try {
-      // Pull if not available locally
       if (!isModelAvailable(modelNames, candidate)) {
         await pullModel(candidate);
       }
 
-      // Speed test
       const result = await speedTest(candidate);
 
       if (result.tokensPerSecond >= 5) {
@@ -112,14 +93,12 @@ async function autoSelect() {
           fallback: candidate !== candidates[0]
         };
       }
-      // Too slow — try next candidate
-    } catch (err) {
-      // Pull or speed test failed for this candidate — try next
+    } catch {
       continue;
     }
   }
 
-  // All candidates tried. Use the smallest as a last resort even if slow.
+  // Last resort
   const lastResort = candidates[candidates.length - 1];
   try {
     if (!isModelAvailable(modelNames, lastResort)) {
@@ -134,5 +113,5 @@ async function autoSelect() {
 
 module.exports = {
   getSelectedModel, setSelectedModel, listModels, autoSelect,
-  OLLAMA_BASE, MODEL_TIERS, getSystemRamGB
+  MODEL_TIERS, getSystemRamGB
 };

@@ -5,7 +5,8 @@ const assert = require('assert');
 const supertest = require('supertest');
 const app = require('../app');
 const db = require('../db');
-const { OLLAMA_BASE, MODEL_TIERS, getSystemRamGB } = require('../lib/model-selector');
+const { MODEL_TIERS, getSystemRamGB } = require('../lib/model-selector');
+const { OLLAMA_BASE } = require('../lib/ollama');
 
 const request = supertest(app);
 
@@ -335,7 +336,7 @@ describe('Model management API', function () {
   describe('POST /api/models/auto-select', function () {
     it('auto-selects a model from real ollama and speed-tests it', async function () {
       if (!ollamaAvailable) return this.skip();
-      this.timeout(120000);
+      this.timeout(300000);
 
       const res = await request.post('/api/models/auto-select');
       assert.strictEqual(res.status, 200);

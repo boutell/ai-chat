@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { getSelectedModel, OLLAMA_BASE } = require('../lib/model-selector');
+const { getSelectedModel } = require('../lib/model-selector');
+const { ollamaPost, ollamaStream } = require('../lib/ollama');
 
 // List all chats (most recent first)
 router.get('/', (req, res) => {
@@ -73,23 +74,11 @@ router.post('/:id/messages', async (req, res) => {
   });
 
   try {
-    const ollamaRes = await fetch(`${OLLAMA_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [systemMessage, ...messages],
-        stream: true
-      })
+    const ollamaRes = await ollamaStream('/api/chat', {
+      model,
+      messages: [systemMessage, ...messages],
+      stream: true
     });
-
-    if (!ollamaRes.ok) {
-      const errText = await ollamaRes.text();
-      res.write(`data: ${JSON.stringify({ error: `Ollama error: ${errText}` })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-      return;
-    }
 
     let fullResponse = '';
     const reader = ollamaRes.body.getReader();
@@ -102,7 +91,7 @@ router.post('/:id/messages', async (req, res) => {
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep incomplete line in buffer
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.trim()) continue;
@@ -113,11 +102,9 @@ router.post('/:id/messages', async (req, res) => {
             res.write(`data: ${JSON.stringify({ token: json.message.content })}\n\n`);
           }
           if (json.done) {
-            // Save assistant message
             db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', fullResponse);
             db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(req.params.id);
 
-            // Auto-title after first assistant response
             const messageCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE chat_id = ? AND role = \'assistant\'').get(req.params.id);
             if (messageCount.count === 1 && chat.title === 'New Chat') {
               generateTitle(req.params.id, content, fullResponse, model);
@@ -142,29 +129,22 @@ router.post('/:id/messages', async (req, res) => {
 // Auto-generate chat title (fire-and-forget)
 async function generateTitle(chatId, userMessage, assistantMessage, model) {
   try {
-    const res = await fetch(`${OLLAMA_BASE}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: 'system',
-            content: 'Generate a short title (3-6 words) for this conversation. Reply with ONLY the title, no quotes or punctuation.'
-          },
-          { role: 'user', content: userMessage },
-          { role: 'assistant', content: assistantMessage.substring(0, 500) },
-          { role: 'user', content: 'Generate a short title for this conversation.' }
-        ],
-        stream: false
-      })
+    const data = await ollamaPost('/api/chat', {
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: 'Generate a short title (3-6 words) for this conversation. Reply with ONLY the title, no quotes or punctuation.'
+        },
+        { role: 'user', content: userMessage },
+        { role: 'assistant', content: assistantMessage.substring(0, 500) },
+        { role: 'user', content: 'Generate a short title for this conversation.' }
+      ],
+      stream: false
     });
-    if (res.ok) {
-      const data = await res.json();
-      const title = data.message.content.trim().substring(0, 100);
-      if (title) {
-        db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(title, chatId);
-      }
+    const title = data.message.content.trim().substring(0, 100);
+    if (title) {
+      db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(title, chatId);
     }
   } catch {
     // title generation is best-effort
