@@ -29,7 +29,9 @@ async function chatsPlugin(fastify, opts) {
   // Get a chat with its messages
   fastify.get('/:id', async (request, reply) => {
     const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(request.params.id);
-    if (!chat) return reply.code(404).send({ error: 'Chat not found' });
+    if (!chat) {
+      return reply.code(404).send({ error: 'Chat not found' });
+    }
     const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC').all(request.params.id);
     return { ...chat, messages };
   });
@@ -37,7 +39,9 @@ async function chatsPlugin(fastify, opts) {
   // Delete a chat
   fastify.delete('/:id', async (request, reply) => {
     const result = db.prepare('DELETE FROM chats WHERE id = ?').run(request.params.id);
-    if (result.changes === 0) return reply.code(404).send({ error: 'Chat not found' });
+    if (result.changes === 0) {
+      return reply.code(404).send({ error: 'Chat not found' });
+    }
     return { success: true };
   });
 
@@ -56,7 +60,9 @@ async function chatsPlugin(fastify, opts) {
     const title = request.body.title;
     db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(title, request.params.id);
     const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(request.params.id);
-    if (!chat) return reply.code(404).send({ error: 'Chat not found' });
+    if (!chat) {
+      return reply.code(404).send({ error: 'Chat not found' });
+    }
     return chat;
   });
 
@@ -73,7 +79,9 @@ async function chatsPlugin(fastify, opts) {
     }
   }, async (request, reply) => {
     const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(request.params.id);
-    if (!chat) return reply.code(404).send({ error: 'Chat not found' });
+    if (!chat) {
+      return reply.code(404).send({ error: 'Chat not found' });
+    }
 
     const content = request.body.content;
 
@@ -115,14 +123,18 @@ async function chatsPlugin(fastify, opts) {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop();
 
         for (const line of lines) {
-          if (!line.trim()) continue;
+          if (!line.trim()) {
+            continue;
+          }
           try {
             const json = JSON.parse(line);
             if (json.message && json.message.content) {
