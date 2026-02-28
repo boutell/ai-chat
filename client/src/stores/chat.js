@@ -7,7 +7,12 @@ export const useChatStore = defineStore('chat', () => {
   const currentChatId = ref(null);
   const currentMessages = ref([]);
   const streaming = ref(false);
+  const stoppedByUser = ref(false);
   const modelStatus = ref({ selectedModel: null, ollamaConnected: false, available: [] });
+  const autoSelecting = ref(false);
+  const autoSelectProgress = ref('');
+
+  let abortController = null;
 
   const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
 
@@ -51,9 +56,11 @@ export const useChatStore = defineStore('chat', () => {
     currentMessages.value.push({ role: 'assistant', content: '' });
     const assistantMsg = currentMessages.value[currentMessages.value.length - 1];
     streaming.value = true;
+    stoppedByUser.value = false;
+    abortController = new AbortController();
 
     try {
-      const res = await postStream(`/api/chats/${currentChatId.value}/messages`, { content });
+      const res = await postStream(`/api/chats/${currentChatId.value}/messages`, { content }, { signal: abortController.signal });
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -89,9 +96,15 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
     } catch (err) {
-      assistantMsg.content += `\n\n**Error:** ${err.message}`;
+      if (err.name === 'AbortError') {
+        stoppedByUser.value = true;
+        assistantMsg.content += ' *(stopped)*';
+      } else {
+        assistantMsg.content += `\n\n**Error:** ${err.message}`;
+      }
     } finally {
       streaming.value = false;
+      abortController = null;
     }
   }
 
@@ -104,14 +117,68 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function autoSelectModel() {
+    autoSelecting.value = true;
+    autoSelectProgress.value = 'Starting auto-select...';
     try {
-      const data = await post('/api/models/auto-select');
-      await fetchModelStatus();
-      return data;
+      const res = await postStream('/api/models/auto-select');
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') {
+              await fetchModelStatus();
+              return;
+            }
+            try {
+              const event = JSON.parse(data);
+              if (event.step === 'ram') {
+                autoSelectProgress.value = `${event.ramGB}GB RAM detected`;
+              } else if (event.step === 'pulling') {
+                autoSelectProgress.value = `Downloading ${event.model}...`;
+              } else if (event.step === 'testing') {
+                autoSelectProgress.value = `Testing ${event.model}...`;
+              } else if (event.step === 'result') {
+                autoSelectProgress.value = event.model;
+                await fetchModelStatus();
+              } else if (event.error) {
+                autoSelectProgress.value = `Error: ${event.error}`;
+              }
+            } catch {
+              // skip malformed SSE
+            }
+          }
+        }
+      }
     } catch (err) {
       console.warn('Auto-select failed:', err.message);
-      return { error: err.message };
+      autoSelectProgress.value = `Error: ${err.message}`;
+    } finally {
+      autoSelecting.value = false;
     }
+  }
+
+  function stopStreaming() {
+    if (abortController) {
+      abortController.abort();
+    }
+  }
+
+  async function selectModel(name) {
+    await post('/api/models/select', { model: name });
+    await fetchModelStatus();
   }
 
   return {
@@ -120,13 +187,18 @@ export const useChatStore = defineStore('chat', () => {
     currentMessages,
     currentChat,
     streaming,
+    stoppedByUser,
     modelStatus,
+    autoSelecting,
+    autoSelectProgress,
     fetchChats,
     loadChat,
     createChat,
     deleteChat,
     sendMessage,
+    stopStreaming,
     fetchModelStatus,
-    autoSelectModel
+    autoSelectModel,
+    selectModel
   };
 });

@@ -120,6 +120,12 @@ async function chatsPlugin(fastify, opts) {
       const reader = ollamaRes.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let clientDisconnected = false;
+
+      res.on('close', () => {
+        clientDisconnected = true;
+        reader.cancel();
+      });
 
       while (true) {
         const { done, value } = await reader.read();
@@ -158,7 +164,15 @@ async function chatsPlugin(fastify, opts) {
         }
       }
 
-      res.end();
+      // Save partial response if client disconnected before [DONE]
+      if (clientDisconnected && fullResponse) {
+        db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
+        db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
+      }
+
+      if (!clientDisconnected) {
+        res.end();
+      }
     } catch (err) {
       res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
       res.write('data: [DONE]\n\n');

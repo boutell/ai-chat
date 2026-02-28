@@ -35,10 +35,19 @@
       >
         <template #append-inner>
           <v-btn
+            v-if="store.streaming"
+            icon="mdi-stop-circle"
+            size="small"
+            variant="text"
+            color="red"
+            @click="store.stopStreaming()"
+          />
+          <v-btn
+            v-else
             icon="mdi-send"
             size="small"
             variant="text"
-            :disabled="!input.trim() || store.streaming"
+            :disabled="!input.trim()"
             @click="send"
           />
         </template>
@@ -57,6 +66,11 @@ const input = ref('');
 const messagesContainer = ref(null);
 
 function handleKeydown(e) {
+  if (e.key === 'Escape' && store.streaming) {
+    e.preventDefault();
+    store.stopStreaming();
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     send();

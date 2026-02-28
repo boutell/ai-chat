@@ -35,10 +35,11 @@ export async function del(url) {
 }
 
 // Returns the raw Response for streaming reads
-export async function postStream(url, body) {
+export async function postStream(url, body, options = {}) {
   return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    ...options
   });
 }

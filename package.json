@@ -9,6 +9,7 @@
     "dev:client": "cd client && npx vite",
     "install:all": "cd server && npm install && cd ../client && npm install",
     "test": "cd server && npm test",
+    "test:all": "cd server && npm run test:all",
     "test:e2e": "npx playwright test"
   },
   "repository": {

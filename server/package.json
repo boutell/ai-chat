@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "mocha --exit test/**/*.test.js"
+    "test": "mocha --exit test/api.test.js",
+    "test:all": "mocha --exit test/**/*.test.js"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

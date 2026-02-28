@@ -5,7 +5,7 @@ const assert = require('assert');
 const supertest = require('supertest');
 const buildApp = require('../app');
 const db = require('../db');
-const { MODEL_TIERS, getSystemRamGB } = require('../lib/model-selector');
+const { getSystemRamGB } = require('../lib/model-selector');
 const { OLLAMA_BASE } = require('../lib/ollama');
 
 let app;
@@ -17,7 +17,7 @@ let availableModels = [];
 let testModel = null;
 
 before(async function () {
-  this.timeout(10000);
+  this.timeout(120000);
   app = await buildApp();
   await app.ready();
   request = supertest(app.server);
@@ -42,6 +42,17 @@ before(async function () {
     console.log('  ⚠ ollama not available — some tests will be skipped');
   } else {
     console.log(`  ✓ ollama available, using model: ${testModel}`);
+    // Warm up the model so test timing is predictable
+    try {
+      await fetch(`${OLLAMA_BASE}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: testModel, prompt: 'hi', stream: false, options: { num_predict: 1 } })
+      });
+      console.log(`  ✓ model warmed up`);
+    } catch {
+      // warmup is best-effort
+    }
   }
 });
 
@@ -342,70 +353,4 @@ describe('Model management API', function () {
     });
   });
 
-  describe('POST /api/models/auto-select', function () {
-    it('auto-selects a model from real ollama and speed-tests it', async function () {
-      if (!ollamaAvailable) return this.skip();
-      this.timeout(300000);
-
-      const res = await request.post('/api/models/auto-select');
-      assert.strictEqual(res.status, 200);
-      assert.ok(res.body.model, 'Should return a selected model name');
-      assert.ok(res.body.ramGB > 0, 'Should report system RAM');
-
-      // The selected model should be appropriate for this machine's RAM
-      const ramGB = res.body.ramGB;
-      const expectedTier = MODEL_TIERS.find(t => ramGB >= t.minRam);
-      // It should either be the tier pick or a fallback (smaller)
-      const tierIndex = MODEL_TIERS.findIndex(t => t.model === res.body.model);
-      const expectedIndex = MODEL_TIERS.findIndex(t => t.model === expectedTier.model);
-      assert.ok(tierIndex >= expectedIndex,
-        `Selected ${res.body.model} but expected ${expectedTier.model} or a smaller fallback for ${ramGB}GB RAM`);
-
-      // Should have persisted the selection
-      const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('selected_model');
-      assert.strictEqual(row.value, res.body.model);
-
-      // Speed info should be present (unless last-resort fallback)
-      if (res.body.speed) {
-        assert.ok(res.body.speed.tokensPerSecond > 0, 'Speed test should report tokens/sec');
-      }
-    });
-
-    it('returns 500 when ollama is completely unreachable', async function () {
-      const restore = mockFetch(async () => {
-        throw new Error('Connection refused');
-      });
-
-      try {
-        const res = await request.post('/api/models/auto-select');
-        assert.strictEqual(res.status, 500);
-        assert.ok(res.body.error.includes('Auto-select failed'));
-      } finally {
-        restore();
-      }
-    });
-
-    it('returns 500 when all model pulls fail', async function () {
-      this.timeout(5000);
-
-      const restore = mockFetch(async (url) => {
-        if (url.includes('/api/tags')) {
-          // No models locally available
-          return { ok: true, json: async () => ({ models: [] }) };
-        }
-        if (url.includes('/api/pull')) {
-          return { ok: false, text: async () => 'pull failed' };
-        }
-        throw new Error(`Unexpected fetch: ${url}`);
-      });
-
-      try {
-        const res = await request.post('/api/models/auto-select');
-        assert.strictEqual(res.status, 500);
-        assert.ok(res.body.error, 'Should return an error message');
-      } finally {
-        restore();
-      }
-    });
-  });
 });

@@ -31,14 +31,25 @@ async function ollamaPlugin(fastify, opts) {
     }
   });
 
-  // Auto-select model
+  // Auto-select model (SSE progress stream)
   fastify.post('/auto-select', async (request, reply) => {
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+
     try {
-      const result = await autoSelect();
-      return result;
+      await autoSelect((event) => {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      });
     } catch (err) {
-      return reply.code(500).send({ error: 'Auto-select failed: ' + err.message });
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     }
+    res.write('data: [DONE]\n\n');
+    res.end();
   });
 
   // Manual model selection

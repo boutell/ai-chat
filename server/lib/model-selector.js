@@ -62,8 +62,10 @@ function isModelAvailable(modelNames, candidate) {
   return modelNames.some(n => n === candidate || n.split(':')[0] === base);
 }
 
-async function autoSelect() {
+async function autoSelect(onProgress = () => {}) {
   const ramGB = getSystemRamGB();
+  onProgress({ step: 'ram', ramGB });
+
   const models = await listModels();
   const modelNames = models.map(m => m.name);
 
@@ -79,19 +81,23 @@ async function autoSelect() {
   for (const candidate of candidates) {
     try {
       if (!isModelAvailable(modelNames, candidate)) {
+        onProgress({ step: 'pulling', model: candidate });
         await pullModel(candidate);
       }
 
+      onProgress({ step: 'testing', model: candidate });
       const result = await speedTest(candidate);
 
       if (result.tokensPerSecond >= 5) {
         setSelectedModel(candidate);
-        return {
+        const finalResult = {
           model: candidate,
           ramGB,
           speed: result,
           fallback: candidate !== candidates[0]
         };
+        onProgress({ step: 'result', ...finalResult });
+        return finalResult;
       }
     } catch {
       continue;
@@ -102,10 +108,13 @@ async function autoSelect() {
   const lastResort = candidates[candidates.length - 1];
   try {
     if (!isModelAvailable(modelNames, lastResort)) {
+      onProgress({ step: 'pulling', model: lastResort });
       await pullModel(lastResort);
     }
     setSelectedModel(lastResort);
-    return { model: lastResort, ramGB, speed: null, fallback: true };
+    const finalResult = { model: lastResort, ramGB, speed: null, fallback: true };
+    onProgress({ step: 'result', ...finalResult });
+    return finalResult;
   } catch (err) {
     throw new Error(`Could not pull any model. Last tried: ${lastResort}. Error: ${err.message}`);
   }
