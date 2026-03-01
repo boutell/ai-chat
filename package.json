@@ -1,7 +1,7 @@
 {
   "name": "ai-chat",
   "version": "1.0.0",
-  "description": "Local-first AI chatbot powered by ollama with a Vue 3 + Vuetify frontend",
+  "description": "Local-first AI chatbot powered by node-llama-cpp with a Vue 3 + Vuetify frontend",
   "private": true,
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"npm run dev:server\" \"npm run dev:client\"",
@@ -10,7 +10,9 @@
     "install:all": "cd server && npm install && cd ../client && npm install",
     "test": "cd server && npm test",
     "test:all": "cd server && npm run test:all",
-    "test:e2e": "npx playwright test"
+    "test:e2e": "npx playwright test",
+    "clear-model": "cd server && node clear-model.js",
+    "clear-downloads": "cd server && node clear-downloads.js"
   },
   "repository": {
     "type": "git",
@@ -20,7 +22,7 @@
     "ai",
     "chat",
     "llm",
-    "ollama"
+    "llama-cpp"
   ],
   "author": "Thomas Boutell (tom@apostrophecms.com)",
   "license": "MIT",

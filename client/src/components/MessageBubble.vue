@@ -52,7 +52,18 @@ const md = new MarkdownIt({
 });
 
 const renderedContent = computed(() => {
-  return md.render(props.message.content || '');
+  let html = md.render(props.message.content || '');
+  if (props.streaming && props.message.content) {
+    // Inject cursor inline at the end of the last block element
+    const cursor = '<span class="streaming-cursor">▌</span>';
+    const lastClose = html.lastIndexOf('</');
+    if (lastClose !== -1) {
+      html = html.slice(0, lastClose) + cursor + html.slice(lastClose);
+    } else {
+      html += cursor;
+    }
+  }
+  return html;
 });
 </script>
 
@@ -92,5 +103,17 @@ const renderedContent = computed(() => {
 .markdown-body :deep(ol) {
   padding-left: 1.5em;
   margin-bottom: 0.5em;
+}
+
+.markdown-body :deep(.streaming-cursor) {
+  animation: blink 530ms steps(2, start) infinite;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  font-weight: bold;
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
 }
 </style>

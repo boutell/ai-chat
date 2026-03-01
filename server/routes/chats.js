@@ -1,6 +1,6 @@
-const db = require('../db');
-const { getSelectedModel } = require('../lib/model-selector');
-const { ollamaPost, ollamaStream } = require('../lib/ollama');
+import db from '../db.js';
+import { getSelectedModelPath } from '../lib/model-selector.js';
+import { chatStream, chatComplete } from '../lib/llm.js';
 
 async function chatsPlugin(fastify, opts) {
   // List all chats (most recent first)
@@ -93,12 +93,16 @@ async function chatsPlugin(fastify, opts) {
     const messages = db.prepare('SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at ASC').all(request.params.id);
 
     const now = new Date();
+    const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
     const systemMessage = {
       role: 'system',
-      content: `You are a helpful AI assistant. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`
+      content: `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`
     };
 
-    const model = getSelectedModel() || 'mistral-small-3.1';
+    const modelPath = getSelectedModelPath();
+    if (!modelPath) {
+      return reply.code(503).send({ error: 'No model selected. Please run auto-select first.' });
+    }
 
     // Set up SSE — hijack the response so Fastify doesn't manage it
     reply.hijack();
@@ -109,101 +113,71 @@ async function chatsPlugin(fastify, opts) {
       'Connection': 'keep-alive'
     });
 
+    const abortController = new AbortController();
+    let clientDisconnected = false;
+
+    res.on('close', () => {
+      clientDisconnected = true;
+      abortController.abort();
+    });
+
     try {
-      const ollamaRes = await ollamaStream('/api/chat', {
-        model,
-        messages: [systemMessage, ...messages],
-        stream: true
-      });
-
       let fullResponse = '';
-      const reader = ollamaRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let clientDisconnected = false;
 
-      res.on('close', () => {
-        clientDisconnected = true;
-        reader.cancel();
+      await chatStream(modelPath, [systemMessage, ...messages], {
+        onTextChunk: (chunk) => {
+          if (!clientDisconnected) {
+            fullResponse += chunk;
+            res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
+          }
+        },
+        signal: abortController.signal
       });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
+      // Save the complete response
+      db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
+      db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.trim()) {
-            continue;
-          }
-          try {
-            const json = JSON.parse(line);
-            if (json.message && json.message.content) {
-              fullResponse += json.message.content;
-              res.write(`data: ${JSON.stringify({ token: json.message.content })}\n\n`);
-            }
-            if (json.done) {
-              db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
-              db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
-
-              const messageCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE chat_id = ? AND role = \'assistant\'').get(request.params.id);
-              if (messageCount.count === 1 && chat.title === 'New Chat') {
-                generateTitle(request.params.id, content, fullResponse, model);
-              }
-
-              res.write('data: [DONE]\n\n');
-            }
-          } catch {
-            // skip malformed JSON lines
-          }
-        }
-      }
-
-      // Save partial response if client disconnected before [DONE]
-      if (clientDisconnected && fullResponse) {
-        db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
-        db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
+      const messageCount = db.prepare('SELECT COUNT(*) as count FROM messages WHERE chat_id = ? AND role = \'assistant\'').get(request.params.id);
+      if (messageCount.count === 1 && chat.title === 'New Chat') {
+        generateTitle(request.params.id, content, fullResponse, modelPath);
       }
 
       if (!clientDisconnected) {
+        res.write('data: [DONE]\n\n');
         res.end();
       }
     } catch (err) {
-      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
+      if (err.name === 'AbortError' || clientDisconnected) {
+        // Client disconnected — do nothing
+      } else {
+        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
     }
   });
 }
 
 // Auto-generate chat title (fire-and-forget)
-async function generateTitle(chatId, userMessage, assistantMessage, model) {
+async function generateTitle(chatId, userMessage, assistantMessage, modelPath) {
   try {
-    const data = await ollamaPost('/api/chat', {
-      model,
-      messages: [
-        {
-          role: 'system',
-          content: 'Generate a short title (3-6 words) for this conversation. Reply with ONLY the title, no quotes or punctuation.'
-        },
-        { role: 'user', content: userMessage },
-        { role: 'assistant', content: assistantMessage.substring(0, 500) },
-        { role: 'user', content: 'Generate a short title for this conversation.' }
-      ],
-      stream: false
-    });
-    const title = data.message.content.trim().substring(0, 100);
-    if (title) {
-      db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(title, chatId);
+    const title = await chatComplete(modelPath, [
+      {
+        role: 'system',
+        content: 'Generate a short title (3-6 words) for this conversation. Reply with ONLY the title, no quotes or punctuation.'
+      },
+      { role: 'user', content: userMessage },
+      { role: 'assistant', content: assistantMessage.substring(0, 500) },
+      { role: 'user', content: 'Generate a short title for this conversation.' }
+    ]);
+    const trimmed = title.trim().substring(0, 100);
+    if (trimmed) {
+      db.prepare('UPDATE chats SET title = ?, updated_at = datetime(\'now\') WHERE id = ?').run(trimmed, chatId);
     }
   } catch {
     // title generation is best-effort
   }
 }
 
-module.exports = chatsPlugin;
+export default chatsPlugin;

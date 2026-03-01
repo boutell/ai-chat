@@ -31,7 +31,7 @@
         hide-details
         density="comfortable"
         @keydown="handleKeydown"
-        :disabled="store.streaming"
+        :disabled="store.streaming || store.modelBusy"
       >
         <template #append-inner>
           <v-btn
@@ -79,7 +79,7 @@ function handleKeydown(e) {
 
 async function send() {
   const text = input.value.trim();
-  if (!text || store.streaming) return;
+  if (!text || store.streaming || store.modelBusy) return;
   input.value = '';
   await store.sendMessage(text);
 }

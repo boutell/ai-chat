@@ -1,20 +1,17 @@
-// Set up in-memory DB before any app imports
-process.env.AI_CHAT_DB = ':memory:';
-
-const assert = require('assert');
-const supertest = require('supertest');
-const buildApp = require('../app');
-const db = require('../db');
-const { getSystemRamGB } = require('../lib/model-selector');
-const { OLLAMA_BASE } = require('../lib/ollama');
+import assert from 'assert';
+import supertest from 'supertest';
+import buildApp from '../app.js';
+import db from '../db.js';
+import { getSystemRamGB, pathToModelId } from '../lib/model-selector.js';
+import { listLocalModels, _setChatStreamOverride } from '../lib/llm.js';
 
 let app;
 let request;
 
-// Probe ollama once at startup
-let ollamaAvailable = false;
-let availableModels = [];
-let testModel = null;
+// Probe for available local models at startup
+let modelsAvailable = false;
+let testModelPath = null;
+let testModelId = null;
 
 before(async function () {
   this.timeout(120000);
@@ -22,66 +19,47 @@ before(async function () {
   await app.ready();
   request = supertest(app.server);
 
-  try {
-    const res = await fetch(`${OLLAMA_BASE}/api/tags`);
-    if (res.ok) {
-      const data = await res.json();
-      availableModels = (data.models || []).map(m => m.name);
-      ollamaAvailable = availableModels.length > 0;
-      if (ollamaAvailable) {
-        // Pick the smallest available model for tests
-        testModel = availableModels.sort((a, b) => a.length - b.length)[0];
-        // Pre-select it so message tests can use it
-        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', testModel);
-      }
-    }
-  } catch {
-    // ollama not running
-  }
-  if (!ollamaAvailable) {
-    console.log('  ⚠ ollama not available — some tests will be skipped');
-  } else {
-    console.log(`  ✓ ollama available, using model: ${testModel}`);
-    // Warm up the model so test timing is predictable
+  // Check if any local models are available
+  const models = listLocalModels();
+  modelsAvailable = models.length > 0;
+
+  if (modelsAvailable) {
+    testModelPath = models[0].path;
+    testModelId = models[0].name;
+    // Pre-select it so message tests can use it
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', testModelId);
+    console.log(`  ✓ local model available: ${testModelId}`);
+
+    // Warm up the model
     try {
-      await fetch(`${OLLAMA_BASE}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: testModel, prompt: 'hi', stream: false, options: { num_predict: 1 } })
-      });
+      await request.post('/api/chats').send({});
+      const chat = db.prepare('SELECT * FROM chats ORDER BY id DESC LIMIT 1').get();
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', testModelId);
+      const warmupRes = await request.post(`/api/chats/${chat.id}/messages`)
+        .send({ content: 'hi' })
+        .buffer(true)
+        .parse((res, cb) => {
+          let data = '';
+          res.on('data', chunk => { data += chunk; });
+          res.on('end', () => cb(null, data));
+        });
       console.log(`  ✓ model warmed up`);
+      // Clean up warmup chat
+      db.exec('DELETE FROM messages');
+      db.exec('DELETE FROM chats');
     } catch {
       // warmup is best-effort
     }
+  } else {
+    console.log('  ⚠ no local models — some tests will be skipped');
   }
 });
 
 after(async function () {
-  if (app) await app.close();
+  if (app) {
+    await app.close();
+  }
 });
-
-// Helper: mock global.fetch (only used for failure-scenario tests)
-function mockFetch(handler) {
-  const original = global.fetch;
-  global.fetch = handler;
-  return () => { global.fetch = original; };
-}
-
-// Helper: create a readable stream of newline-delimited JSON
-function makeOllamaStream(chunks) {
-  const encoder = new TextEncoder();
-  const data = chunks.map(c => encoder.encode(JSON.stringify(c) + '\n'));
-  let i = 0;
-  return new ReadableStream({
-    pull(controller) {
-      if (i < data.length) {
-        controller.enqueue(data[i++]);
-      } else {
-        controller.close();
-      }
-    }
-  });
-}
 
 // Helper: parse SSE body text into an array of data payloads
 function parseSSE(body) {
@@ -103,7 +81,7 @@ function sseRequest(url) {
 }
 
 // ──────────────────────────────────────────────
-// Chat CRUD — no ollama needed
+// Chat CRUD — no model needed
 // ──────────────────────────────────────────────
 
 describe('Chat CRUD API', function () {
@@ -203,7 +181,7 @@ describe('Chat CRUD API', function () {
 });
 
 // ──────────────────────────────────────────────
-// Message streaming — real ollama
+// Message streaming — real local model
 // ──────────────────────────────────────────────
 
 describe('Message streaming (POST /api/chats/:id/messages)', function () {
@@ -211,13 +189,15 @@ describe('Message streaming (POST /api/chats/:id/messages)', function () {
     db.exec('DELETE FROM messages');
     db.exec('DELETE FROM chats');
     db.exec('DELETE FROM settings');
-    if (testModel) {
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', testModel);
+    if (testModelId) {
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', testModelId);
     }
   });
 
-  it('saves user message and streams real assistant response via ollama', async function () {
-    if (!ollamaAvailable) return this.skip();
+  it('saves user message and streams real assistant response', async function () {
+    if (!modelsAvailable) {
+      return this.skip();
+    }
     this.timeout(120000);
 
     const chat = (await request.post('/api/chats').send({})).body;
@@ -266,12 +246,29 @@ describe('Message streaming (POST /api/chats/:id/messages)', function () {
     assert.strictEqual(res.status, 400);
   });
 
-  it('streams error gracefully when ollama is unreachable', async function () {
-    this.timeout(5000);
+  it('returns 503 when selected model cannot be resolved', async function () {
+    this.timeout(10000);
     const chat = (await request.post('/api/chats').send({})).body;
 
-    const restore = mockFetch(async () => {
-      throw new Error('Connection refused');
+    // Set a model ID that doesn't correspond to any local file
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('selected_model', 'nonexistent-model');
+
+    const res = await request
+      .post(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    assert.strictEqual(res.status, 503);
+  });
+
+  it('streams error gracefully when model fails to load', async function () {
+    if (!modelsAvailable) {
+      return this.skip();
+    }
+    this.timeout(10000);
+    const chat = (await request.post('/api/chats').send({})).body;
+
+    _setChatStreamOverride(async () => {
+      throw new Error('Model failed to load');
     });
 
     try {
@@ -279,16 +276,16 @@ describe('Message streaming (POST /api/chats/:id/messages)', function () {
         .send({ content: 'test' });
 
       assert.strictEqual(res.status, 200); // SSE always starts 200
-      assert.ok(res.body.includes('Connection refused'), 'Should report connection error');
+      assert.ok(res.body.includes('Model failed to load'), 'Should report model error');
       assert.ok(res.body.includes('[DONE]'), 'Should end with [DONE]');
     } finally {
-      restore();
+      _setChatStreamOverride(null);
     }
   });
 });
 
 // ──────────────────────────────────────────────
-// Model management — real ollama where possible
+// Model management
 // ──────────────────────────────────────────────
 
 describe('Model management API', function () {
@@ -297,54 +294,48 @@ describe('Model management API', function () {
   });
 
   describe('GET /api/models/status', function () {
-    it('returns real ollama status and available models', async function () {
-      if (!ollamaAvailable) return this.skip();
-
+    it('returns model status with id, name, and downloaded fields', async function () {
       const res = await request.get('/api/models/status');
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(res.body.ollamaConnected, true);
       assert.ok(Array.isArray(res.body.available), 'available should be an array');
-      assert.ok(res.body.available.length > 0, 'Should list available models');
-    });
-
-    it('reports disconnected when ollama is unreachable', async function () {
-      const restore = mockFetch(async () => {
-        throw new Error('Connection refused');
-      });
-
-      try {
-        const res = await request.get('/api/models/status');
-        assert.strictEqual(res.status, 200);
-        assert.strictEqual(res.body.ollamaConnected, false);
-        assert.deepStrictEqual(res.body.available, []);
-      } finally {
-        restore();
-      }
+      // Should include tier models appropriate for this machine's RAM
+      assert.ok(res.body.available.length > 0, 'should have at least one available model');
+      assert.ok(res.body.available[0].id, 'each model should have an id');
+      assert.ok(res.body.available[0].name, 'each model should have a name');
+      assert.strictEqual(typeof res.body.available[0].downloaded, 'boolean', 'each model should have a downloaded flag');
     });
   });
 
   describe('GET /api/models/available', function () {
-    it('lists models from real ollama', async function () {
-      if (!ollamaAvailable) return this.skip();
-
+    it('lists available models with id, name, and downloaded', async function () {
       const res = await request.get('/api/models/available');
       assert.strictEqual(res.status, 200);
       assert.ok(Array.isArray(res.body));
-      assert.ok(res.body.length > 0);
-      assert.ok(res.body[0].name, 'Each model should have a name');
+      assert.ok(res.body.length > 0, 'should have at least one model');
+      assert.ok(res.body[0].id, 'each model should have an id');
+      assert.ok(res.body[0].name, 'each model should have a name');
+      assert.strictEqual(typeof res.body[0].downloaded, 'boolean', 'each model should have a downloaded flag');
     });
   });
 
   describe('POST /api/models/select', function () {
-    it('sets the selected model and persists it', async function () {
-      const modelName = testModel || 'some-model';
-      const res = await request.post('/api/models/select').send({ model: modelName });
+    it('sets the selected model by ID and persists it', async function () {
+      if (!testModelId) {
+        return this.skip();
+      }
+      const res = await request.post('/api/models/select').send({ model: testModelId });
       assert.strictEqual(res.status, 200);
-      assert.strictEqual(res.body.selectedModel, modelName);
+      assert.strictEqual(res.body.selectedModel, testModelId);
+      assert.ok(res.body.selectedModelName, 'should return a display name');
 
       // Verify persistence in DB
       const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('selected_model');
-      assert.strictEqual(row.value, modelName);
+      assert.strictEqual(row.value, testModelId);
+    });
+
+    it('returns 404 for unknown model ID', async function () {
+      const res = await request.post('/api/models/select').send({ model: 'nonexistent-model' });
+      assert.strictEqual(res.status, 404);
     });
 
     it('returns 400 without model name', async function () {

@@ -8,13 +8,16 @@ export const useChatStore = defineStore('chat', () => {
   const currentMessages = ref([]);
   const streaming = ref(false);
   const stoppedByUser = ref(false);
-  const modelStatus = ref({ selectedModel: null, ollamaConnected: false, available: [] });
+  const modelStatus = ref({ selectedModel: null, available: [] });
   const autoSelecting = ref(false);
   const autoSelectProgress = ref('');
+  const downloading = ref(false);
+  const downloadProgress = ref('');
 
   let abortController = null;
 
   const currentChat = computed(() => chats.value.find(c => c.id === currentChatId.value));
+  const modelBusy = computed(() => autoSelecting.value || downloading.value || !modelStatus.value.selectedModel);
 
   async function fetchChats() {
     chats.value = await get('/api/chats');
@@ -112,7 +115,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       modelStatus.value = await get('/api/models/status');
     } catch {
-      modelStatus.value = { selectedModel: null, ollamaConnected: false, available: [] };
+      modelStatus.value = { selectedModel: null, available: [] };
     }
   }
 
@@ -176,9 +179,69 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function selectModel(name) {
-    await post('/api/models/select', { model: name });
-    await fetchModelStatus();
+  async function selectModel(id) {
+    // Find the model to check if it needs downloading
+    const model = modelStatus.value.available?.find(m => m.id === id);
+    const needsDownload = model && !model.downloaded;
+
+    if (needsDownload) {
+      downloading.value = true;
+      downloadProgress.value = `Downloading ${model.name}...`;
+    }
+
+    try {
+      const res = await postStream('/api/models/select', { model: id });
+      const contentType = res.headers.get('content-type') || '';
+
+      if (contentType.includes('text/event-stream')) {
+        // SSE download stream
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') {
+                await fetchModelStatus();
+                return;
+              }
+              try {
+                const event = JSON.parse(data);
+                if (event.step === 'downloading') {
+                  downloading.value = true;
+                  downloadProgress.value = `Downloading ${event.model}...`;
+                } else if (event.error) {
+                  console.warn('Model download failed:', event.error);
+                }
+              } catch {
+                // skip malformed SSE
+              }
+            }
+          }
+        }
+      } else {
+        // Quick JSON response (already downloaded)
+        const data = await res.json();
+        if (!res.ok) {
+          console.warn('Model selection failed:', data.error);
+        }
+      }
+      await fetchModelStatus();
+    } catch (err) {
+      console.warn('Model selection failed:', err.message);
+    } finally {
+      downloading.value = false;
+    }
   }
 
   return {
@@ -191,6 +254,9 @@ export const useChatStore = defineStore('chat', () => {
     modelStatus,
     autoSelecting,
     autoSelectProgress,
+    downloading,
+    downloadProgress,
+    modelBusy,
     fetchChats,
     loadChat,
     createChat,

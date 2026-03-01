@@ -31,7 +31,7 @@ onMounted(async () => {
   await store.fetchModelStatus();
 
   // Auto-select model if none selected
-  if (!store.modelStatus.selectedModel && store.modelStatus.ollamaConnected) {
+  if (!store.modelStatus.selectedModel) {
     store.autoSelectModel();
   }
 });

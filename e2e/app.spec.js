@@ -1,18 +1,17 @@
 const { test, expect } = require('@playwright/test');
 
-const OLLAMA_URL = 'http://localhost:11434';
-
-// Check if ollama is available with models
-async function checkOllama() {
+// Check if models are available via the API
+async function checkModels(request) {
   try {
-    const res = await fetch(`${OLLAMA_URL}/api/tags`);
-    if (!res.ok) return { available: false };
+    const res = await request.get('/api/models/status');
+    if (!res.ok()) {
+      return { available: false };
+    }
     const data = await res.json();
-    const models = data.models || [];
     return {
-      available: models.length > 0,
-      models: models.map(m => m.name),
-      smallestModel: models.sort((a, b) => (a.size || 0) - (b.size || 0))[0]?.name
+      available: (data.available || []).length > 0 || !!data.selectedModel,
+      selectedModel: data.selectedModel,
+      models: data.available || []
     };
   } catch {
     return { available: false };
@@ -101,13 +100,13 @@ test.describe('Chat management', () => {
 });
 
 // ──────────────────────────────────────────────
-// Model selection — real ollama
+// Model selection
 // ──────────────────────────────────────────────
 
 test.describe('Model selection', () => {
   test('auto-select picks a model and shows it in the toolbar', async ({ page }) => {
-    const ollama = await checkOllama();
-    test.skip(!ollama.available, 'ollama not available');
+    const models = await checkModels(page.request);
+    test.skip(!models.available, 'no local models available');
 
     // Make sure no model is pre-selected
     await page.request.post('/api/models/select', { data: { model: '' } }).catch(() => {});
@@ -119,30 +118,24 @@ test.describe('Model selection', () => {
     const chip = page.locator('.v-app-bar .v-chip');
     await expect(chip).toBeVisible();
 
-    // Check via API that auto-select worked
+    // Check via API that a model is selected
     const status = await page.request.get('/api/models/status');
     const statusData = await status.json();
-    expect(statusData.ollamaConnected).toBe(true);
-    expect(statusData.available.length).toBeGreaterThan(0);
+    expect(statusData.selectedModel).toBeTruthy();
   });
 });
 
 // ──────────────────────────────────────────────
-// Full conversation — real ollama streaming
+// Full conversation — real model streaming
 // ──────────────────────────────────────────────
 
-test.describe('Real conversation through ollama', () => {
-  // These tests involve cold model loads + inference, need generous timeouts
+test.describe('Real conversation', () => {
+  // These tests involve model loads + inference, need generous timeouts
   test.describe.configure({ timeout: 180000 });
 
   test('send a message and receive a streamed response', async ({ page }) => {
-    const ollama = await checkOllama();
-    test.skip(!ollama.available, 'ollama not available');
-
-    // Pre-select the smallest model for speed
-    await page.request.post('/api/models/select', {
-      data: { model: ollama.smallestModel }
-    });
+    const models = await checkModels(page.request);
+    test.skip(!models.available, 'no local models available');
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');
@@ -156,7 +149,6 @@ test.describe('Real conversation through ollama', () => {
     await expect(page.locator('.user-text').first()).toContainText('pong');
 
     // Wait for assistant response — check for non-empty text content
-    // (the .markdown-body div exists immediately but is empty until tokens arrive)
     const assistantBubble = page.locator('.markdown-body').first();
     await expect(assistantBubble).not.toBeEmpty({ timeout: 120000 });
 
@@ -178,12 +170,8 @@ test.describe('Real conversation through ollama', () => {
   });
 
   test('chat appears in sidebar after sending a message', async ({ page }) => {
-    const ollama = await checkOllama();
-    test.skip(!ollama.available, 'ollama not available');
-
-    await page.request.post('/api/models/select', {
-      data: { model: ollama.smallestModel }
-    });
+    const models = await checkModels(page.request);
+    test.skip(!models.available, 'no local models available');
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');
@@ -204,8 +192,8 @@ test.describe('Real conversation through ollama', () => {
   });
 
   test('no console errors during full conversation flow', async ({ page }) => {
-    const ollama = await checkOllama();
-    test.skip(!ollama.available, 'ollama not available');
+    const models = await checkModels(page.request);
+    test.skip(!models.available, 'no local models available');
 
     const errors = [];
     page.on('pageerror', err => errors.push(err.message));
@@ -215,10 +203,6 @@ test.describe('Real conversation through ollama', () => {
       if (res.status() >= 500) {
         failedRequests.push({ url: res.url(), status: res.status() });
       }
-    });
-
-    await page.request.post('/api/models/select', {
-      data: { model: ollama.smallestModel }
     });
 
     await page.goto('/');
