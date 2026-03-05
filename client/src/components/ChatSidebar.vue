@@ -13,7 +13,7 @@
         v-for="chat in store.chats"
         :key="chat.id"
         :active="chat.id === store.currentChatId"
-        @click="store.loadChat(chat.id)"
+        @click="selectChat(chat.id)"
         :title="chat.title"
         :subtitle="formatDate(chat.updated_at)"
       >
@@ -33,10 +33,17 @@
 <script setup>
 import { useChatStore } from '../stores/chat.js';
 
+const emit = defineEmits(['select-chat']);
 const store = useChatStore();
 
 async function newChat() {
   await store.createChat();
+  emit('select-chat');
+}
+
+function selectChat(id) {
+  store.loadChat(id);
+  emit('select-chat');
 }
 
 function formatDate(dateStr) {

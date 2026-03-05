@@ -7,7 +7,7 @@ import path from 'path';
 import envPaths from 'env-paths';
 import db from './db.js';
 
-const modelsDir = path.join(envPaths('ai-chat').data, 'models');
+const modelsDir = path.join(envPaths(process.env.AI_CHAT_NAMESPACE || 'ai-chat').data, 'models');
 
 let count = 0;
 try {

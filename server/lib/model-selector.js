@@ -8,7 +8,7 @@ import path from 'path';
 export const MODEL_TIERS = [
   { minRam: 32, uri: 'hf:bartowski/Mistral-Small-Instruct-2409-GGUF:Q4_K_M', name: 'Mistral Small 22B' },
   { minRam: 10, uri: 'hf:bartowski/Ministral-8B-Instruct-2410-GGUF:Q4_K_M', name: 'Ministral 8B' },
-  { minRam: 5, uri: 'hf:bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M', name: 'Phi 3.5 Mini' },
+  { minRam: 5, uri: 'hf:bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M', name: 'Llama 3.2 3B' },
   { minRam: 0, uri: 'hf:bartowski/mistralai_Ministral-3-3B-Instruct-2512-GGUF:Q4_K_M', name: 'Ministral 3B' }
 ];
 

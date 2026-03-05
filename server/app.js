@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { fileURLToPath } from 'url';
 import chatsPlugin from './routes/chats.js';
 import modelsPlugin from './routes/models.js';
+import toolsPlugin from './routes/tools.js';
 
 async function buildApp() {
   const fastify = Fastify();
@@ -10,6 +11,7 @@ async function buildApp() {
   await fastify.register(cors);
   await fastify.register(chatsPlugin, { prefix: '/api/chats' });
   await fastify.register(modelsPlugin, { prefix: '/api/models' });
+  await fastify.register(toolsPlugin, { prefix: '/api/tools' });
 
   return fastify;
 }

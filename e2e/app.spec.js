@@ -27,6 +27,17 @@ async function deleteAllChats(request) {
   }
 }
 
+// Open the sidebar drawer via the hamburger menu
+async function openDrawer(page) {
+  const drawer = page.locator('.v-navigation-drawer');
+  // Only click if not already open
+  const isActive = await drawer.evaluate(el => el.classList.contains('v-navigation-drawer--active'));
+  if (!isActive) {
+    await page.locator('.v-app-bar-nav-icon').click();
+  }
+  await expect(page.getByRole('button', { name: 'New Chat' })).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   await deleteAllChats(page.request);
 });
@@ -41,7 +52,7 @@ test.describe('App loads', () => {
     page.on('pageerror', err => errors.push(err.message));
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     await expect(page.locator('.v-app-bar-title')).toContainText('AI Chat');
     await expect(page.getByRole('button', { name: 'New Chat' })).toBeVisible();
@@ -52,7 +63,7 @@ test.describe('App loads', () => {
 
   test('shows empty state when no chat selected', async ({ page }) => {
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     await expect(page.getByText('Start a new conversation')).toBeVisible();
   });
@@ -65,21 +76,26 @@ test.describe('App loads', () => {
 test.describe('Chat management', () => {
   test('can create a new chat', async ({ page }) => {
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     await page.getByRole('button', { name: 'New Chat' }).click();
     await expect(page.getByPlaceholder('Type a message')).toBeVisible();
+    // New Chat closes the sidebar, reopen to verify the chat appeared
+    await openDrawer(page);
     await expect(page.locator('.v-navigation-drawer .v-list-item')).toHaveCount(1);
   });
 
   test('can create and switch between multiple chats', async ({ page }) => {
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     await page.getByRole('button', { name: 'New Chat' }).click();
+    // New Chat closes the sidebar, reopen it to continue
+    await openDrawer(page);
     await expect(page.locator('.v-navigation-drawer .v-list-item')).toHaveCount(1);
 
     await page.getByRole('button', { name: 'New Chat' }).click();
+    await openDrawer(page);
     await expect(page.locator('.v-navigation-drawer .v-list-item')).toHaveCount(2);
 
     // Click the second chat (older one) in the list
@@ -88,9 +104,11 @@ test.describe('Chat management', () => {
 
   test('can delete a chat', async ({ page }) => {
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     await page.getByRole('button', { name: 'New Chat' }).click();
+    // New Chat closes the sidebar, reopen to interact with chat list
+    await openDrawer(page);
     await expect(page.locator('.v-navigation-drawer .v-list-item')).toHaveCount(1);
 
     await page.locator('.v-navigation-drawer .v-list-item button').first().click();
@@ -112,7 +130,7 @@ test.describe('Model selection', () => {
     await page.request.post('/api/models/select', { data: { model: '' } }).catch(() => {});
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // Model status chip should show an actual model name (not "No model")
     const chip = page.locator('.v-app-bar .v-chip');
@@ -138,7 +156,7 @@ test.describe('Real conversation', () => {
     test.skip(!models.available, 'no local models available');
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // Type and send a message
     const input = page.getByPlaceholder('Type a message');
@@ -158,7 +176,7 @@ test.describe('Real conversation', () => {
 
     // Message should be persisted — reload and verify
     await page.reload();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // Click the chat in the sidebar to reload it
     await page.locator('.v-navigation-drawer .v-list-item').first().click();
@@ -174,7 +192,7 @@ test.describe('Real conversation', () => {
     test.skip(!models.available, 'no local models available');
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // Initially no chats
     await expect(page.locator('.v-navigation-drawer .v-list-item')).toHaveCount(0);
@@ -206,7 +224,7 @@ test.describe('Real conversation', () => {
     });
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // Send a message
     const input = page.getByPlaceholder('Type a message');

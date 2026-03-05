@@ -56,7 +56,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // Add placeholder for assistant — must reference through the reactive
     // array so Vue tracks mutations to .content for rendering
-    currentMessages.value.push({ role: 'assistant', content: '' });
+    currentMessages.value.push({ role: 'assistant', content: '', toolCalls: [] });
     const assistantMsg = currentMessages.value[currentMessages.value.length - 1];
     streaming.value = true;
     stoppedByUser.value = false;
@@ -88,6 +88,21 @@ export const useChatStore = defineStore('chat', () => {
               const json = JSON.parse(data);
               if (json.token) {
                 assistantMsg.content += json.token;
+              }
+              if (json.toolCall) {
+                assistantMsg.toolCalls.push({
+                  ...json.toolCall,
+                  result: null
+                });
+              }
+              if (json.toolResult) {
+                // Update the most recent matching tool call with its result
+                for (let j = assistantMsg.toolCalls.length - 1; j >= 0; j--) {
+                  if (assistantMsg.toolCalls[j].name === json.toolResult.name && !assistantMsg.toolCalls[j].result) {
+                    assistantMsg.toolCalls[j].result = json.toolResult;
+                    break;
+                  }
+                }
               }
               if (json.error) {
                 assistantMsg.content += `\n\n**Error:** ${json.error}`;

@@ -3,7 +3,7 @@ import envPaths from 'env-paths';
 import { existsSync, mkdirSync, readdirSync } from 'fs';
 import path from 'path';
 
-const paths = envPaths('ai-chat');
+const paths = envPaths(process.env.AI_CHAT_NAMESPACE || 'ai-chat');
 export const MODELS_DIR = path.join(paths.data, 'models');
 
 // Ensure models directory exists
@@ -47,15 +47,20 @@ export async function loadModel(modelPath) {
   return loadedModel;
 }
 
-export async function chatStream(modelPath, messages, { onTextChunk, signal } = {}) {
+export async function chatStream(modelPath, messages, { onTextChunk, signal, functions } = {}) {
   if (chatStreamOverride) {
-    return chatStreamOverride(modelPath, messages, { onTextChunk, signal });
+    return chatStreamOverride(modelPath, messages, { onTextChunk, signal, functions });
   }
 
   const model = await loadModel(modelPath);
-  const context = await model.createContext({
-    contextSize: Math.min(4096, model.trainContextSize)
-  });
+  // Try desired context size, fall back to smaller if VRAM is tight
+  let context;
+  const desiredSize = Math.min(4096, model.trainContextSize);
+  try {
+    context = await model.createContext({ contextSize: desiredSize });
+  } catch {
+    context = await model.createContext({ contextSize: Math.min(2048, model.trainContextSize) });
+  }
 
   try {
     // Separate system prompt from chat history
@@ -84,11 +89,16 @@ export async function chatStream(modelPath, messages, { onTextChunk, signal } = 
     // Get the last user message
     const lastUserMessage = chatMessages[chatMessages.length - 1]?.content || '';
 
-    const response = await session.prompt(lastUserMessage, {
+    const promptOptions = {
       onTextChunk,
       signal,
       stopOnAbortSignal: true
-    });
+    };
+    if (functions) {
+      promptOptions.functions = functions;
+    }
+
+    const response = await session.prompt(lastUserMessage, promptOptions);
 
     return response;
   } finally {
