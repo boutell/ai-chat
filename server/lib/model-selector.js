@@ -201,9 +201,9 @@ export async function autoSelect(onProgress = () => {}) {
 
   const models = listLocalModels();
 
-  // Only consider models that fit in available RAM, smallest first
-  // so the fastest model that passes the speed test becomes the default
-  const candidates = MODEL_TIERS.filter(t => ramGB >= t.minRam).reverse();
+  // Only consider models that fit in available RAM, largest first
+  // so we pick the best model that passes the speed test
+  const candidates = MODEL_TIERS.filter(t => ramGB >= t.minRam);
 
   if (candidates.length === 0) {
     // Even the smallest model requires more RAM than available — try it anyway

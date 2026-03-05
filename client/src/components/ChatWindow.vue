@@ -119,7 +119,25 @@ function onScroll() {
   isAtBottom.value = (el.scrollHeight - el.scrollTop - el.clientHeight) < 40;
 }
 
-// Auto-scroll only if the user was already at the bottom
+function scrollToBottom() {
+  const el = getScrollContainer();
+  if (el) {
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+// Auto-scroll when new messages are added (e.g. user sends a message)
+watch(
+  () => store.currentMessages.length,
+  async () => {
+    await nextTick();
+    scrollToBottom();
+    // New messages always reset to "at bottom" so streaming auto-scrolls
+    isAtBottom.value = true;
+  }
+);
+
+// Auto-scroll as content streams, but only if the user is at the bottom
 watch(
   () => store.currentMessages.length > 0 ? store.currentMessages[store.currentMessages.length - 1].content : '',
   async () => {
@@ -127,10 +145,7 @@ watch(
       return;
     }
     await nextTick();
-    const el = getScrollContainer();
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
+    scrollToBottom();
   }
 );
 

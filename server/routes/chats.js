@@ -107,7 +107,7 @@ async function chatsPlugin(fastify, opts) {
       systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
     }
     if (containerAvailable || webSearchAvailable) {
-      systemContent += '\nAfter running code or searching, if you want to share the output with the user (especially large outputs like tables, charts, ASCII art, or data), call show_output instead of copying the result into your response. This displays the output instantly without you needing to reproduce it. Use format "code" to wrap in a code block. You can still add your own commentary before or after calling show_output.';
+      systemContent += '\nIMPORTANT: After running code, ALWAYS use show_output to display the results to the user. NEVER copy, retype, or recreate tool output in your response — that is slow and error-prone. Instead, call show_output with format "code" and then add your commentary. This applies to ALL tool output: calculations, tables, charts, ASCII art, data, etc. The show_output tool displays results instantly and perfectly.';
     }
     const systemMessage = { role: 'system', content: systemContent };
 

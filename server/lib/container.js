@@ -32,18 +32,50 @@ async function detectRuntime() {
   for (const cmd of ['docker', 'podman']) {
     try {
       await execPromise(cmd, ['--version']);
+    } catch {
+      continue;
+    }
+    // Binary exists — verify it can actually run containers
+    try {
+      await execPromise(cmd, ['info']);
       runtime = cmd;
       return runtime;
     } catch {
-      // try next
+      // On macOS, podman needs a VM ("machine"). Try to start or create one.
+      if (cmd === 'podman') {
+        if (await ensurePodmanMachine()) {
+          runtime = cmd;
+          return runtime;
+        }
+      }
     }
   }
   return null;
 }
 
-function execPromise(cmd, args) {
+async function ensurePodmanMachine() {
+  // Try starting an existing machine first
+  try {
+    await execPromise('podman', ['machine', 'start'], 120000);
+    await execPromise('podman', ['info']);
+    return true;
+  } catch {
+    // Machine might not exist yet
+  }
+  // Create and start a new machine
+  try {
+    await execPromise('podman', ['machine', 'init'], 120000);
+    await execPromise('podman', ['machine', 'start'], 120000);
+    await execPromise('podman', ['info']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function execPromise(cmd, args, timeout = 10000) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: 10000 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout }, (err, stdout, stderr) => {
       if (err) {
         reject(err);
       } else {
