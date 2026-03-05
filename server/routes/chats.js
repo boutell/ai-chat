@@ -101,7 +101,12 @@ async function chatsPlugin(fastify, opts) {
     const webSearchAvailable = isWebSearchAvailable();
     let systemContent = `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`;
     if (containerAvailable) {
-      systemContent += '\nYou have access to a run_code tool that executes code in a sandboxed container. ALWAYS use it for any math beyond trivial arithmetic — multiplication, division, exponents, algebra, unit conversions, etc. Never guess at calculations. Also use it for data processing, code verification, or any task where running code would produce a more accurate answer. Available languages: python, javascript, bash. The container has no network access.';
+      systemContent += `
+You have access to a run_code tool that executes code in a sandboxed container. ALWAYS use it for any math beyond trivial arithmetic — multiplication, division, exponents, algebra, unit conversions, etc. Never guess at calculations. Also use it for data processing, code verification, or any task where running code would produce a more accurate answer. Available languages: python, javascript, bash. The container has no network access.
+Rules for generated code:
+- Code MUST print all output to the console (use print() in Python, console.log() in JavaScript, echo in bash). Code runs as a script, not a REPL — bare expressions produce no output.
+- Solve the entire problem in a SINGLE tool call whenever possible. For example, if asked to calculate totals AND draw a chart, do both in one script, not two separate calls.
+- Only built-in standard library modules are available. Do NOT import third-party packages (no pandas, numpy, matplotlib, requests, etc.). Use only modules that ship with Python, Node.js, or bash.`;
     }
     if (webSearchAvailable) {
       systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';

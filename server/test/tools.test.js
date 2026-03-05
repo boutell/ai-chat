@@ -3,7 +3,7 @@ import supertest from 'supertest';
 import buildApp from '../app.js';
 import db from '../db.js';
 import { listLocalModels, _setChatStreamOverride } from '../lib/llm.js';
-import { _setIsAvailableOverride, _setRunCodeOverride, _autoPrintPython } from '../lib/container.js';
+import { _setIsAvailableOverride, _setRunCodeOverride } from '../lib/container.js';
 import { _setIsAvailableOverride as setWebSearchAvailableOverride, _setSearchOverride, isAvailable as wsIsAvailable } from '../lib/web-search.js';
 
 let app;
@@ -78,66 +78,6 @@ describe('Container module', function () {
     const result = await runCode('python', 'print(42)');
     assert.strictEqual(result.stdout, 'mock: python print(42)');
     assert.strictEqual(result.exitCode, 0);
-  });
-});
-
-// ──────────────────────────────────────────────
-// Python auto-print
-// ──────────────────────────────────────────────
-
-describe('Python auto-print', function () {
-  it('wraps a single-line expression in print()', function () {
-    assert.strictEqual(_autoPrintPython('2 + 2'), 'print(2 + 2)');
-  });
-
-  it('wraps a single-line variable reference in print()', function () {
-    assert.strictEqual(_autoPrintPython('result'), 'print(result)');
-  });
-
-  it('does not wrap a single-line assignment', function () {
-    assert.strictEqual(_autoPrintPython('x = 5'), 'x = 5');
-  });
-
-  it('does not wrap a single-line print call', function () {
-    assert.strictEqual(_autoPrintPython('print(42)'), 'print(42)');
-  });
-
-  it('wraps last bare expression in multi-line script', function () {
-    const code = 'x = 10\ny = 20\nx + y';
-    const result = _autoPrintPython(code);
-    assert.ok(result.endsWith('print(x + y)'), `Expected print wrap, got: ${result}`);
-    assert.ok(result.startsWith('x = 10'), 'Should preserve earlier lines');
-  });
-
-  it('wraps last bare tuple expression in multi-line script', function () {
-    const code = 'total = sum([1,2,3])\navg = total / 3\ntotal, avg';
-    const result = _autoPrintPython(code);
-    assert.ok(result.endsWith('print(total, avg)'), `Expected print wrap, got: ${result}`);
-  });
-
-  it('does not modify multi-line script that already has print()', function () {
-    const code = 'x = 10\nprint(x)\nx + 5';
-    assert.strictEqual(_autoPrintPython(code), code);
-  });
-
-  it('does not wrap indented last lines (inside a block)', function () {
-    const code = 'for i in range(3):\n    i * 2';
-    assert.strictEqual(_autoPrintPython(code), code);
-  });
-
-  it('does not wrap a last-line assignment in multi-line script', function () {
-    const code = 'x = 10\ny = x + 5';
-    assert.strictEqual(_autoPrintPython(code), code);
-  });
-
-  it('handles augmented assignment', function () {
-    const code = 'x = 10\nx += 5';
-    assert.strictEqual(_autoPrintPython(code), code);
-  });
-
-  it('does not wrap comments or empty last lines', function () {
-    const code = 'x = 10\n# done';
-    assert.strictEqual(_autoPrintPython(code), code);
   });
 });
 
