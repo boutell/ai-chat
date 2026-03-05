@@ -176,7 +176,7 @@ describe('Tool calling SSE pipeline', function () {
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
       onTextChunk('Let me calculate. ');
       if (functions && functions.run_code) {
-        await functions.run_code.handler({ language: 'python', code: 'print(2+2)' });
+        await functions.run_code.handler({ code: 'print(2+2)' });
       }
       onTextChunk('The answer is 4.');
       return 'Let me calculate. The answer is 4.';
@@ -208,6 +208,16 @@ describe('Tool calling SSE pipeline', function () {
     assert.strictEqual(toolResults[0].toolResult.name, 'run_code');
     assert.strictEqual(toolResults[0].toolResult.output, '4\n');
     assert.strictEqual(toolResults[0].toolResult.exitCode, 0);
+
+    // Should auto-inject output into the response
+    const injects = parsed.filter(e => e.inject);
+    assert.strictEqual(injects.length, 1, 'Should have one inject event');
+    assert.ok(injects[0].inject.includes('4'), 'Inject should contain the output');
+    assert.ok(injects[0].inject.includes('```'), 'Inject should be wrapped in code block');
+
+    // Persisted message should include the injected output
+    const savedMessages = db.prepare('SELECT * FROM messages WHERE chat_id = ? AND role = ?').all(chat.id, 'assistant');
+    assert.ok(savedMessages[0].content.includes('4'), 'Saved message should include tool output');
 
     assert.ok(events.includes('[DONE]'), 'Stream should end with [DONE]');
   });
@@ -256,7 +266,7 @@ describe('Tool calling SSE pipeline', function () {
 
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
       if (functions && functions.run_code) {
-        await functions.run_code.handler({ language: 'python', code: 'print(2+' });
+        await functions.run_code.handler({ code: 'print(2+' });
       }
       onTextChunk('There was a syntax error.');
       return 'There was a syntax error.';
@@ -291,7 +301,7 @@ describe('Tool calling SSE pipeline', function () {
 
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
       if (functions && functions.run_code) {
-        await functions.run_code.handler({ language: 'bash', code: 'sleep 60' });
+        await functions.run_code.handler({ code: 'import time; time.sleep(60)' });
       }
       onTextChunk('The code timed out.');
       return 'The code timed out.';
@@ -313,7 +323,7 @@ describe('Tool calling SSE pipeline', function () {
     assert.strictEqual(toolResults[0].toolResult.exitCode, 137);
   });
 
-  it('system prompt mentions code execution when container is available', async function () {
+  it('system prompt mentions run_code when container is available', async function () {
     if (!testModelId) {
       return this.skip();
     }
@@ -336,6 +346,8 @@ describe('Tool calling SSE pipeline', function () {
 
     const systemMsg = capturedMessages.find(m => m.role === 'system');
     assert.ok(systemMsg.content.includes('run_code'), 'System prompt should mention run_code tool');
+    assert.ok(systemMsg.content.includes('automatically shown to the user'), 'System prompt should tell model output is shown');
+    assert.ok(!systemMsg.content.includes('show_output'), 'System prompt should NOT mention show_output');
   });
 
   it('system prompt does NOT mention code execution when container is unavailable', async function () {
@@ -462,146 +474,7 @@ describe('Tool calling SSE pipeline', function () {
     assert.ok(!systemMsg.content.includes('run_code'), 'System prompt should not mention run_code');
   });
 
-  // ──────────────────────────────────────────────
-  // show_output tool tests
-  // ──────────────────────────────────────────────
-
-  it('show_output injects tool output via SSE inject event', async function () {
-    if (!testModelId) {
-      return this.skip();
-    }
-    this.timeout(15000);
-
-    _setIsAvailableOverride(() => true);
-    _setRunCodeOverride(async () => {
-      return { stdout: 'CHART_DATA_HERE\nLINE2\n', stderr: '', exitCode: 0, timedOut: false };
-    });
-
-    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
-      // Model runs code first
-      await functions.run_code.handler({ language: 'python', code: 'print("CHART_DATA_HERE\\nLINE2")' });
-      onTextChunk('Here is the chart:\n\n');
-      // Then calls show_output to display the result
-      await functions.show_output.handler({ content: 'stdout', format: 'code' });
-      onTextChunk('\nDone!');
-      return 'Here is the chart:\n\nDone!';
-    });
-
-    const chat = (await request.post('/api/chats').send({})).body;
-    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
-      .send({ content: 'Make a chart' });
-
-    assert.strictEqual(res.status, 200);
-    const events = parseSSE(res.body);
-    const parsed = events
-      .filter(e => e !== '[DONE]')
-      .map(e => { try { return JSON.parse(e); } catch { return null; } })
-      .filter(Boolean);
-
-    // Should have an inject event
-    const injects = parsed.filter(e => e.inject);
-    assert.strictEqual(injects.length, 1, 'Should have exactly one inject event');
-    assert.ok(injects[0].inject.includes('CHART_DATA_HERE'), 'Inject should contain the tool output');
-    assert.ok(injects[0].inject.startsWith('```'), 'Inject should be wrapped in code block');
-
-    // The saved message should include injected content
-    const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? AND role = ?').all(chat.id, 'assistant');
-    assert.ok(messages[0].content.includes('CHART_DATA_HERE'), 'Saved message should include injected output');
-  });
-
-  it('show_output returns empty message when no previous tool result', async function () {
-    if (!testModelId) {
-      return this.skip();
-    }
-    this.timeout(15000);
-
-    _setIsAvailableOverride(() => true);
-
-    let showOutputResult = null;
-    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
-      // Call show_output without any prior tool call
-      showOutputResult = await functions.show_output.handler({ content: 'stdout', format: 'plain' });
-      onTextChunk('Nothing to show.');
-      return 'Nothing to show.';
-    });
-
-    const chat = (await request.post('/api/chats').send({})).body;
-    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
-      .send({ content: 'Show output' });
-
-    assert.strictEqual(showOutputResult, '(no previous tool output to display)');
-
-    // No inject events should have been emitted
-    const events = parseSSE(res.body);
-    const parsed = events
-      .filter(e => e !== '[DONE]')
-      .map(e => { try { return JSON.parse(e); } catch { return null; } })
-      .filter(Boolean);
-
-    assert.strictEqual(parsed.filter(e => e.inject).length, 0, 'Should have no inject events');
-  });
-
-  it('show_output can inject stderr or all content', async function () {
-    if (!testModelId) {
-      return this.skip();
-    }
-    this.timeout(15000);
-
-    _setIsAvailableOverride(() => true);
-    _setRunCodeOverride(async () => {
-      return { stdout: 'out-text', stderr: 'err-text', exitCode: 1, timedOut: false };
-    });
-
-    let allInjectText = null;
-    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
-      await functions.run_code.handler({ language: 'python', code: 'x' });
-      const result = await functions.show_output.handler({ content: 'all', format: 'plain' });
-      onTextChunk('Done');
-      return 'Done';
-    });
-
-    const chat = (await request.post('/api/chats').send({})).body;
-    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
-      .send({ content: 'test' });
-
-    const events = parseSSE(res.body);
-    const parsed = events
-      .filter(e => e !== '[DONE]')
-      .map(e => { try { return JSON.parse(e); } catch { return null; } })
-      .filter(Boolean);
-
-    const injects = parsed.filter(e => e.inject);
-    assert.strictEqual(injects.length, 1);
-    assert.ok(injects[0].inject.includes('out-text'), 'Should contain stdout');
-    assert.ok(injects[0].inject.includes('err-text'), 'Should contain stderr');
-  });
-
-  it('system prompt mentions show_output when tools are available', async function () {
-    if (!testModelId) {
-      return this.skip();
-    }
-    this.timeout(15000);
-
-    _setIsAvailableOverride(() => true);
-
-    let capturedMessages = null;
-    _setChatStreamOverride(async (modelPath, messages, { onTextChunk }) => {
-      if (!capturedMessages) {
-        capturedMessages = messages;
-      }
-      onTextChunk('OK');
-      return 'OK';
-    });
-
-    const chat = (await request.post('/api/chats').send({})).body;
-    await sseRequest(`/api/chats/${chat.id}/messages`)
-      .send({ content: 'test' });
-
-    const systemMsg = capturedMessages.find(m => m.role === 'system');
-    assert.ok(systemMsg.content.includes('show_output'), 'System prompt should mention show_output');
-  });
-
-  it('offers both tools when both are available', async function () {
+  it('offers both tools when both are available, without show_output', async function () {
     if (!testModelId) {
       return this.skip();
     }
@@ -632,5 +505,6 @@ describe('Tool calling SSE pipeline', function () {
     assert.ok(capturedFunctions, 'Functions should be provided');
     assert.ok(capturedFunctions.run_code, 'Should have run_code function');
     assert.ok(capturedFunctions.web_search, 'Should have web_search function');
+    assert.ok(!capturedFunctions.show_output, 'Should NOT have show_output');
   });
 });

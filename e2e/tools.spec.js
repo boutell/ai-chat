@@ -189,46 +189,6 @@ test.describe('Web search UI', () => {
 });
 
 // ──────────────────────────────────────────────
-// show_output tool (inject)
-// ──────────────────────────────────────────────
-
-test.describe('show_output tool', () => {
-  test.describe.configure({ timeout: 180000 });
-
-  test('show_output injects tool result into assistant message', async ({ page }) => {
-    const containerAvailable = await checkContainerAvailable(page.request);
-    test.skip(!containerAvailable, 'no container runtime available');
-
-    const modelId = await selectFunctionCallingModel(page.request);
-    test.skip(!modelId, 'no function-calling model available');
-
-    await page.goto('/');
-    await page.waitForLoadState('load');
-
-    // Ask for something that produces multi-line output, and explicitly
-    // request show_output to encourage the model to use it
-    const input = page.getByPlaceholder('Type a message');
-    await input.fill(
-      'Use run_code to run this Python code:\n\n' +
-      'for i in range(1, 6):\n' +
-      '    print(f"Item {i}: {\'#\' * (i * 3)}")\n\n' +
-      'Then use show_output to display the result to me.'
-    );
-    await input.press('Enter');
-
-    // Wait for tool call panel (run_code)
-    const toolPanel = page.locator('.tool-calls .v-expansion-panel');
-    await expect(toolPanel.first()).toBeVisible({ timeout: 120000 });
-
-    // The assistant response should contain the output (either via show_output inject
-    // or the model copying it). Either way, the output should be visible.
-    const assistantBubble = page.locator('.markdown-body').first();
-    await expect(assistantBubble).toContainText('Item 1', { timeout: 60000 });
-    await expect(assistantBubble).toContainText('Item 5', { timeout: 5000 });
-  });
-});
-
-// ──────────────────────────────────────────────
 // Code execution produces printed output
 // ──────────────────────────────────────────────
 

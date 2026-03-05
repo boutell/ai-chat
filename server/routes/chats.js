@@ -102,17 +102,14 @@ async function chatsPlugin(fastify, opts) {
     let systemContent = `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`;
     if (containerAvailable) {
       systemContent += `
-You have access to a run_code tool that executes code in a sandboxed container. ALWAYS use it for any math beyond trivial arithmetic — multiplication, division, exponents, algebra, unit conversions, etc. Never guess at calculations. Also use it for data processing, code verification, or any task where running code would produce a more accurate answer. Available languages: python, javascript, bash. The container has no network access.
-Rules for generated code:
-- Code MUST print all output to the console (use print() in Python, console.log() in JavaScript, echo in bash). Code runs as a script, not a REPL — bare expressions produce no output.
-- Solve the entire problem in a SINGLE tool call whenever possible. For example, if asked to calculate totals AND draw a chart, do both in one script, not two separate calls.
-- Only built-in standard library modules are available. Do NOT import third-party packages (no pandas, numpy, matplotlib, requests, etc.). Use only modules that ship with Python, Node.js, or bash.`;
+You have a run_code tool that runs Python code in a sandbox. Use it for any math, calculations, or data processing. The output of the script is automatically shown to the user, so do not repeat it in your response. Just comment on the results.
+Rules:
+- Always use print() for output. Code runs as a script, not a REPL — bare expressions produce no output.
+- Write complete, self-contained scripts. Each call starts fresh with no memory of previous calls.
+- Only use built-in Python modules. Do NOT import third-party packages (no pandas, numpy, matplotlib, requests, etc.).`;
     }
     if (webSearchAvailable) {
       systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
-    }
-    if (containerAvailable || webSearchAvailable) {
-      systemContent += '\nIMPORTANT: After running code, ALWAYS use show_output to display the results to the user. NEVER copy, retype, or recreate tool output in your response — that is slow and error-prone. Instead, call show_output with format "code" and then add your commentary. This applies to ALL tool output: calculations, tables, charts, ASCII art, data, etc. The show_output tool displays results instantly and perfectly.';
     }
     const systemMessage = { role: 'system', content: systemContent };
 
@@ -155,12 +152,16 @@ Rules for generated code:
         } else if (event.type === 'toolResult') {
           if (event.name === 'run_code') {
             res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, output: event.output, stderr: event.stderr, exitCode: event.exitCode, timedOut: event.timedOut } })}\n\n`);
+            // Auto-inject output into the assistant message so the user sees it inline
+            const output = event.output || event.stderr || '';
+            if (output.trim()) {
+              const inject = '\n```\n' + output.trimEnd() + '\n```\n';
+              fullResponse += inject;
+              res.write(`data: ${JSON.stringify({ inject })}\n\n`);
+            }
           } else if (event.name === 'web_search') {
             res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, results: event.results, answer: event.answer } })}\n\n`);
           }
-        } else if (event.type === 'inject') {
-          fullResponse += event.text;
-          res.write(`data: ${JSON.stringify({ inject: event.text })}\n\n`);
         }
       };
       const functions = (containerAvailable || webSearchAvailable) ? await getChatFunctions(onToolEvent) : undefined;
