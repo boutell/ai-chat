@@ -85,22 +85,7 @@ export async function runCode(language, code, { timeout = 30000 } = {}) {
   // no import, no def, etc.), wrap it in print() so the result appears in stdout
   let finalCode = code;
   if (language === 'python') {
-    const trimmed = code.trim();
-    const isExpression = !trimmed.includes('\n') &&
-      !trimmed.startsWith('print') &&
-      !trimmed.startsWith('import ') &&
-      !trimmed.startsWith('from ') &&
-      !trimmed.startsWith('def ') &&
-      !trimmed.startsWith('class ') &&
-      !trimmed.includes('=') &&
-      !trimmed.startsWith('for ') &&
-      !trimmed.startsWith('while ') &&
-      !trimmed.startsWith('if ') &&
-      !trimmed.startsWith('try:') &&
-      !trimmed.startsWith('with ');
-    if (isExpression) {
-      finalCode = `print(${trimmed})`;
-    }
+    finalCode = autoPrintPython(code);
   }
 
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'ai-chat-code-'));
@@ -187,3 +172,76 @@ export async function runCode(language, code, { timeout = 30000 } = {}) {
 
   return { stdout, stderr, exitCode, timedOut };
 }
+
+// Keywords/prefixes that indicate a line is a statement, not an expression
+const STATEMENT_PREFIXES = [
+  'print', 'import ', 'from ', 'def ', 'class ', 'for ', 'while ',
+  'if ', 'try:', 'with ', 'return ', 'raise ', 'assert ', 'del ',
+  'pass', 'break', 'continue', 'yield ', 'async ', 'await ', 'global ',
+  'nonlocal ', 'elif ', 'else:', 'except', 'finally:'
+];
+
+function looksLikeExpression(line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) {
+    return false;
+  }
+  for (const prefix of STATEMENT_PREFIXES) {
+    if (trimmed.startsWith(prefix)) {
+      return false;
+    }
+  }
+  // Assignment (but not ==, !=, <=, >=)
+  if (/[^!=<>]=[^=]/.test(trimmed)) {
+    return false;
+  }
+  // Augmented assignment (+=, -=, etc.)
+  if (/[+\-*/%&|^]+=/.test(trimmed)) {
+    return false;
+  }
+  return true;
+}
+
+// If Python code has no print() calls and the last line is a bare expression,
+// wrap it in print(). This mimics REPL behavior for scripts.
+function autoPrintPython(code) {
+  const trimmed = code.trim();
+  const lines = trimmed.split('\n');
+
+  // Single-line: wrap the whole thing if it's an expression
+  if (lines.length === 1) {
+    if (looksLikeExpression(trimmed)) {
+      return `print(${trimmed})`;
+    }
+    return code;
+  }
+
+  // Multi-line: if the script already has print() calls, leave it alone
+  if (/\bprint\s*\(/.test(trimmed)) {
+    return code;
+  }
+
+  // Check if the last non-empty line is a bare expression
+  let lastIdx = lines.length - 1;
+  while (lastIdx >= 0 && !lines[lastIdx].trim()) {
+    lastIdx--;
+  }
+  if (lastIdx < 0) {
+    return code;
+  }
+
+  const lastLine = lines[lastIdx];
+  const indent = lastLine.match(/^(\s*)/)[1];
+
+  // Only wrap if the last line is at the top indentation level (not inside a block)
+  // and looks like an expression
+  if (indent.length === 0 && looksLikeExpression(lastLine)) {
+    lines[lastIdx] = `print(${lastLine.trim()})`;
+    return lines.join('\n');
+  }
+
+  return code;
+}
+
+// Exported for testing
+export { autoPrintPython as _autoPrintPython };

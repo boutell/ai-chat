@@ -11,6 +11,9 @@ export async function getChatFunctions(onToolEvent) {
     return null;
   }
 
+  // Track the last tool result so show_output can reference it
+  let lastToolResult = null;
+
   if (containerAvailable) {
     functions.run_code = defineChatSessionFunction({
       description: 'Run code in a sandboxed container and return the output. Available languages: python, javascript, bash. The container has no network access.',
@@ -35,6 +38,14 @@ export async function getChatFunctions(onToolEvent) {
 
         // Filter podman noise from stderr before sending to frontend
         const cleanStderr = filterContainerNoise(result.stderr);
+
+        lastToolResult = {
+          name: 'run_code',
+          stdout: result.stdout,
+          stderr: cleanStderr,
+          exitCode: result.exitCode,
+          timedOut: result.timedOut
+        };
 
         if (onToolEvent) {
           onToolEvent({
@@ -88,6 +99,12 @@ export async function getChatFunctions(onToolEvent) {
         try {
           const { results, answer } = await webSearch(query);
 
+          lastToolResult = {
+            name: 'web_search',
+            results,
+            answer
+          };
+
           if (onToolEvent) {
             onToolEvent({
               type: 'toolResult',
@@ -126,6 +143,64 @@ export async function getChatFunctions(onToolEvent) {
       }
     });
   }
+
+  // show_output: inject tool output directly into the response without
+  // the model having to reproduce it token-by-token
+  functions.show_output = defineChatSessionFunction({
+    description: 'Display the output from the most recent tool call directly to the user. Use this instead of copying large outputs (tables, charts, data) into your response. The output appears instantly in your message.',
+    params: {
+      type: 'object',
+      properties: {
+        content: {
+          type: 'string',
+          enum: ['stdout', 'stderr', 'all']
+        },
+        format: {
+          type: 'string',
+          enum: ['plain', 'code']
+        }
+      }
+    },
+    handler({ content = 'stdout', format = 'plain' }) {
+      if (!lastToolResult) {
+        return '(no previous tool output to display)';
+      }
+
+      let text = '';
+      if (lastToolResult.name === 'run_code') {
+        if (content === 'stdout' || content === 'all') {
+          text += lastToolResult.stdout || '';
+        }
+        if (content === 'stderr' || content === 'all') {
+          if (text && lastToolResult.stderr) {
+            text += '\n';
+          }
+          text += lastToolResult.stderr || '';
+        }
+      } else if (lastToolResult.name === 'web_search') {
+        if (lastToolResult.answer) {
+          text += lastToolResult.answer + '\n\n';
+        }
+        for (const r of (lastToolResult.results || [])) {
+          text += `${r.title} - ${r.url}\n${r.content}\n\n`;
+        }
+      }
+
+      if (!text.trim()) {
+        return '(tool output was empty)';
+      }
+
+      if (format === 'code') {
+        text = '```\n' + text + '\n```';
+      }
+
+      if (onToolEvent) {
+        onToolEvent({ type: 'inject', text });
+      }
+
+      return '(output displayed to user)';
+    }
+  });
 
   return functions;
 }

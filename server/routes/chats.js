@@ -106,6 +106,9 @@ async function chatsPlugin(fastify, opts) {
     if (webSearchAvailable) {
       systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
     }
+    if (containerAvailable || webSearchAvailable) {
+      systemContent += '\nAfter running code or searching, if you want to share the output with the user (especially large outputs like tables, charts, ASCII art, or data), call show_output instead of copying the result into your response. This displays the output instantly without you needing to reproduce it. Use format "code" to wrap in a code block. You can still add your own commentary before or after calling show_output.';
+    }
     const systemMessage = { role: 'system', content: systemContent };
 
     const modelPath = getSelectedModelPath();
@@ -150,6 +153,9 @@ async function chatsPlugin(fastify, opts) {
           } else if (event.name === 'web_search') {
             res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, results: event.results, answer: event.answer } })}\n\n`);
           }
+        } else if (event.type === 'inject') {
+          fullResponse += event.text;
+          res.write(`data: ${JSON.stringify({ inject: event.text })}\n\n`);
         }
       };
       const functions = (containerAvailable || webSearchAvailable) ? await getChatFunctions(onToolEvent) : undefined;

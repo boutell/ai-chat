@@ -3,7 +3,7 @@ import supertest from 'supertest';
 import buildApp from '../app.js';
 import db from '../db.js';
 import { listLocalModels, _setChatStreamOverride } from '../lib/llm.js';
-import { _setIsAvailableOverride, _setRunCodeOverride } from '../lib/container.js';
+import { _setIsAvailableOverride, _setRunCodeOverride, _autoPrintPython } from '../lib/container.js';
 import { _setIsAvailableOverride as setWebSearchAvailableOverride, _setSearchOverride, isAvailable as wsIsAvailable } from '../lib/web-search.js';
 
 let app;
@@ -78,6 +78,66 @@ describe('Container module', function () {
     const result = await runCode('python', 'print(42)');
     assert.strictEqual(result.stdout, 'mock: python print(42)');
     assert.strictEqual(result.exitCode, 0);
+  });
+});
+
+// ──────────────────────────────────────────────
+// Python auto-print
+// ──────────────────────────────────────────────
+
+describe('Python auto-print', function () {
+  it('wraps a single-line expression in print()', function () {
+    assert.strictEqual(_autoPrintPython('2 + 2'), 'print(2 + 2)');
+  });
+
+  it('wraps a single-line variable reference in print()', function () {
+    assert.strictEqual(_autoPrintPython('result'), 'print(result)');
+  });
+
+  it('does not wrap a single-line assignment', function () {
+    assert.strictEqual(_autoPrintPython('x = 5'), 'x = 5');
+  });
+
+  it('does not wrap a single-line print call', function () {
+    assert.strictEqual(_autoPrintPython('print(42)'), 'print(42)');
+  });
+
+  it('wraps last bare expression in multi-line script', function () {
+    const code = 'x = 10\ny = 20\nx + y';
+    const result = _autoPrintPython(code);
+    assert.ok(result.endsWith('print(x + y)'), `Expected print wrap, got: ${result}`);
+    assert.ok(result.startsWith('x = 10'), 'Should preserve earlier lines');
+  });
+
+  it('wraps last bare tuple expression in multi-line script', function () {
+    const code = 'total = sum([1,2,3])\navg = total / 3\ntotal, avg';
+    const result = _autoPrintPython(code);
+    assert.ok(result.endsWith('print(total, avg)'), `Expected print wrap, got: ${result}`);
+  });
+
+  it('does not modify multi-line script that already has print()', function () {
+    const code = 'x = 10\nprint(x)\nx + 5';
+    assert.strictEqual(_autoPrintPython(code), code);
+  });
+
+  it('does not wrap indented last lines (inside a block)', function () {
+    const code = 'for i in range(3):\n    i * 2';
+    assert.strictEqual(_autoPrintPython(code), code);
+  });
+
+  it('does not wrap a last-line assignment in multi-line script', function () {
+    const code = 'x = 10\ny = x + 5';
+    assert.strictEqual(_autoPrintPython(code), code);
+  });
+
+  it('handles augmented assignment', function () {
+    const code = 'x = 10\nx += 5';
+    assert.strictEqual(_autoPrintPython(code), code);
+  });
+
+  it('does not wrap comments or empty last lines', function () {
+    const code = 'x = 10\n# done';
+    assert.strictEqual(_autoPrintPython(code), code);
   });
 });
 
@@ -460,6 +520,145 @@ describe('Tool calling SSE pipeline', function () {
     const systemMsg = capturedMessages.find(m => m.role === 'system');
     assert.ok(systemMsg.content.includes('web_search'), 'System prompt should mention web_search');
     assert.ok(!systemMsg.content.includes('run_code'), 'System prompt should not mention run_code');
+  });
+
+  // ──────────────────────────────────────────────
+  // show_output tool tests
+  // ──────────────────────────────────────────────
+
+  it('show_output injects tool output via SSE inject event', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => true);
+    _setRunCodeOverride(async () => {
+      return { stdout: 'CHART_DATA_HERE\nLINE2\n', stderr: '', exitCode: 0, timedOut: false };
+    });
+
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      // Model runs code first
+      await functions.run_code.handler({ language: 'python', code: 'print("CHART_DATA_HERE\\nLINE2")' });
+      onTextChunk('Here is the chart:\n\n');
+      // Then calls show_output to display the result
+      await functions.show_output.handler({ content: 'stdout', format: 'code' });
+      onTextChunk('\nDone!');
+      return 'Here is the chart:\n\nDone!';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'Make a chart' });
+
+    assert.strictEqual(res.status, 200);
+    const events = parseSSE(res.body);
+    const parsed = events
+      .filter(e => e !== '[DONE]')
+      .map(e => { try { return JSON.parse(e); } catch { return null; } })
+      .filter(Boolean);
+
+    // Should have an inject event
+    const injects = parsed.filter(e => e.inject);
+    assert.strictEqual(injects.length, 1, 'Should have exactly one inject event');
+    assert.ok(injects[0].inject.includes('CHART_DATA_HERE'), 'Inject should contain the tool output');
+    assert.ok(injects[0].inject.startsWith('```'), 'Inject should be wrapped in code block');
+
+    // The saved message should include injected content
+    const messages = db.prepare('SELECT * FROM messages WHERE chat_id = ? AND role = ?').all(chat.id, 'assistant');
+    assert.ok(messages[0].content.includes('CHART_DATA_HERE'), 'Saved message should include injected output');
+  });
+
+  it('show_output returns empty message when no previous tool result', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => true);
+
+    let showOutputResult = null;
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      // Call show_output without any prior tool call
+      showOutputResult = await functions.show_output.handler({ content: 'stdout', format: 'plain' });
+      onTextChunk('Nothing to show.');
+      return 'Nothing to show.';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'Show output' });
+
+    assert.strictEqual(showOutputResult, '(no previous tool output to display)');
+
+    // No inject events should have been emitted
+    const events = parseSSE(res.body);
+    const parsed = events
+      .filter(e => e !== '[DONE]')
+      .map(e => { try { return JSON.parse(e); } catch { return null; } })
+      .filter(Boolean);
+
+    assert.strictEqual(parsed.filter(e => e.inject).length, 0, 'Should have no inject events');
+  });
+
+  it('show_output can inject stderr or all content', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => true);
+    _setRunCodeOverride(async () => {
+      return { stdout: 'out-text', stderr: 'err-text', exitCode: 1, timedOut: false };
+    });
+
+    let allInjectText = null;
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      await functions.run_code.handler({ language: 'python', code: 'x' });
+      const result = await functions.show_output.handler({ content: 'all', format: 'plain' });
+      onTextChunk('Done');
+      return 'Done';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    const events = parseSSE(res.body);
+    const parsed = events
+      .filter(e => e !== '[DONE]')
+      .map(e => { try { return JSON.parse(e); } catch { return null; } })
+      .filter(Boolean);
+
+    const injects = parsed.filter(e => e.inject);
+    assert.strictEqual(injects.length, 1);
+    assert.ok(injects[0].inject.includes('out-text'), 'Should contain stdout');
+    assert.ok(injects[0].inject.includes('err-text'), 'Should contain stderr');
+  });
+
+  it('system prompt mentions show_output when tools are available', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => true);
+
+    let capturedMessages = null;
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk }) => {
+      if (!capturedMessages) {
+        capturedMessages = messages;
+      }
+      onTextChunk('OK');
+      return 'OK';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    const systemMsg = capturedMessages.find(m => m.role === 'system');
+    assert.ok(systemMsg.content.includes('show_output'), 'System prompt should mention show_output');
   });
 
   it('offers both tools when both are available', async function () {

@@ -104,6 +104,9 @@ export const useChatStore = defineStore('chat', () => {
                   }
                 }
               }
+              if (json.inject) {
+                assistantMsg.content += json.inject;
+              }
               if (json.error) {
                 assistantMsg.content += `\n\n**Error:** ${json.error}`;
               }
