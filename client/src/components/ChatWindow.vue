@@ -25,6 +25,7 @@
     <div class="chat-input pa-4 pt-2">
       <div class="d-flex align-end ga-2">
         <v-textarea
+          ref="inputEl"
           v-model="input"
           placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
           variant="outlined"
@@ -68,6 +69,7 @@ import MessageBubble from './MessageBubble.vue';
 
 const store = useChatStore();
 const input = ref('');
+const inputEl = ref(null);
 const messagesContainer = ref(null);
 const rootEl = ref(null);
 
@@ -95,6 +97,15 @@ async function send() {
   input.value = '';
   await store.sendMessage(text);
 }
+
+// Focus the input when a chat is created or selected
+watch(
+  () => store.currentChatId,
+  async () => {
+    await nextTick();
+    inputEl.value?.focus();
+  }
+);
 
 // Track whether the user is scrolled to the bottom
 const isAtBottom = ref(true);

@@ -54,18 +54,22 @@ async function deleteAllChats(request) {
   }
 }
 
-// Check if container runtime is available via the API
-async function checkContainerAvailable(request) {
+// Check tool availability via the API
+async function checkToolsStatus(request) {
   try {
     const res = await request.get('/api/tools/status');
     if (!res.ok()) {
-      return false;
+      return { containerAvailable: false, webSearchAvailable: false };
     }
-    const data = await res.json();
-    return data.containerAvailable === true;
+    return await res.json();
   } catch {
-    return false;
+    return { containerAvailable: false, webSearchAvailable: false };
   }
+}
+
+async function checkContainerAvailable(request) {
+  const status = await checkToolsStatus(request);
+  return status.containerAvailable === true;
 }
 
 test.beforeEach(async ({ page }) => {
@@ -144,6 +148,43 @@ test.describe('Tool call UI', () => {
     await toolPanel.first().locator('.v-expansion-panel-title').click();
     const stderrBlock = toolPanel.first().locator('.tool-stderr');
     await expect(stderrBlock).toBeVisible({ timeout: 5000 });
+  });
+});
+
+// ──────────────────────────────────────────────
+// Web search UI
+// ──────────────────────────────────────────────
+
+test.describe('Web search UI', () => {
+  test.describe.configure({ timeout: 180000 });
+
+  test('web search expansion panel appears when model uses web_search', async ({ page }) => {
+    const status = await checkToolsStatus(page.request);
+    test.skip(!status.webSearchAvailable, 'no TAVILY_API_KEY configured');
+
+    const modelId = await selectFunctionCallingModel(page.request);
+    test.skip(!modelId, 'no function-calling model available');
+
+    await page.goto('/');
+    await page.waitForLoadState('load');
+
+    const input = page.getByPlaceholder('Type a message');
+    await input.fill('Use the web_search tool to search for "latest news today"');
+    await input.press('Enter');
+
+    // Wait for tool call panel to appear
+    const toolPanel = page.locator('.tool-calls .v-expansion-panel');
+    await expect(toolPanel.first()).toBeVisible({ timeout: 120000 });
+
+    // Panel title should indicate a web search
+    await expect(toolPanel.first().locator('.v-expansion-panel-title')).toContainText('Searched the web');
+
+    // Expand the panel to see results
+    await toolPanel.first().locator('.v-expansion-panel-title').click();
+
+    // Should see search result links
+    const resultLinks = toolPanel.first().locator('.search-result-link');
+    await expect(resultLinks.first()).toBeVisible({ timeout: 10000 });
   });
 });
 

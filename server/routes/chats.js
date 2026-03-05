@@ -3,6 +3,7 @@ import { getSelectedModelPath } from '../lib/model-selector.js';
 import { chatStream, chatComplete } from '../lib/llm.js';
 import { getChatFunctions } from '../lib/tools.js';
 import { isAvailable as isContainerAvailable } from '../lib/container.js';
+import { isAvailable as isWebSearchAvailable } from '../lib/web-search.js';
 
 async function chatsPlugin(fastify, opts) {
   // List all chats (most recent first)
@@ -97,9 +98,13 @@ async function chatsPlugin(fastify, opts) {
     const now = new Date();
     const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
     const containerAvailable = await isContainerAvailable();
+    const webSearchAvailable = isWebSearchAvailable();
     let systemContent = `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`;
     if (containerAvailable) {
       systemContent += '\nYou have access to a run_code tool that executes code in a sandboxed container. ALWAYS use it for any math beyond trivial arithmetic — multiplication, division, exponents, algebra, unit conversions, etc. Never guess at calculations. Also use it for data processing, code verification, or any task where running code would produce a more accurate answer. Available languages: python, javascript, bash. The container has no network access.';
+    }
+    if (webSearchAvailable) {
+      systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
     }
     const systemMessage = { role: 'system', content: systemContent };
 
@@ -128,17 +133,26 @@ async function chatsPlugin(fastify, opts) {
     try {
       let fullResponse = '';
 
-      // Set up tool functions if container runtime is available
+      // Set up tool functions if any tools are available
       const onToolEvent = (event) => {
-        if (!clientDisconnected) {
-          if (event.type === 'toolCall') {
+        if (clientDisconnected) {
+          return;
+        }
+        if (event.type === 'toolCall') {
+          if (event.name === 'run_code') {
             res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, language: event.language, code: event.code } })}\n\n`);
-          } else if (event.type === 'toolResult') {
+          } else if (event.name === 'web_search') {
+            res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, query: event.query } })}\n\n`);
+          }
+        } else if (event.type === 'toolResult') {
+          if (event.name === 'run_code') {
             res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, output: event.output, stderr: event.stderr, exitCode: event.exitCode, timedOut: event.timedOut } })}\n\n`);
+          } else if (event.name === 'web_search') {
+            res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, results: event.results, answer: event.answer } })}\n\n`);
           }
         }
       };
-      const functions = containerAvailable ? await getChatFunctions(onToolEvent) : undefined;
+      const functions = (containerAvailable || webSearchAvailable) ? await getChatFunctions(onToolEvent) : undefined;
 
       await chatStream(modelPath, [systemMessage, ...messages], {
         onTextChunk: (chunk) => {

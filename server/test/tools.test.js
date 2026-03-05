@@ -4,6 +4,7 @@ import buildApp from '../app.js';
 import db from '../db.js';
 import { listLocalModels, _setChatStreamOverride } from '../lib/llm.js';
 import { _setIsAvailableOverride, _setRunCodeOverride } from '../lib/container.js';
+import { _setIsAvailableOverride as setWebSearchAvailableOverride, _setSearchOverride, isAvailable as wsIsAvailable } from '../lib/web-search.js';
 
 let app;
 let request;
@@ -28,14 +29,12 @@ after(async function () {
   }
 });
 
-// Helper: parse SSE body text into an array of data payloads
 function parseSSE(body) {
   return body.split('\n')
     .filter(line => line.startsWith('data: '))
     .map(line => line.slice(6));
 }
 
-// Helper: supertest SSE request (buffers full response)
 function sseRequest(url) {
   return request
     .post(url)
@@ -83,6 +82,65 @@ describe('Container module', function () {
 });
 
 // ──────────────────────────────────────────────
+// Web search module
+// ──────────────────────────────────────────────
+
+describe('Web search module', function () {
+  afterEach(function () {
+    setWebSearchAvailableOverride(null);
+    _setSearchOverride(null);
+  });
+
+  it('isAvailable override controls availability', function () {
+    setWebSearchAvailableOverride(() => true);
+    assert.strictEqual(wsIsAvailable(), true);
+
+    setWebSearchAvailableOverride(() => false);
+    assert.strictEqual(wsIsAvailable(), false);
+
+    setWebSearchAvailableOverride(null);
+  });
+
+  it('search override intercepts API calls', async function () {
+    _setSearchOverride(async (query) => ({
+      results: [{ title: 'Mock', url: 'https://mock.com', content: 'Mock result' }],
+      answer: 'Mock answer'
+    }));
+
+    const { search } = await import('../lib/web-search.js');
+    const result = await search('test query');
+    assert.strictEqual(result.answer, 'Mock answer');
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.results[0].title, 'Mock');
+  });
+});
+
+// ──────────────────────────────────────────────
+// Tools status API
+// ──────────────────────────────────────────────
+
+describe('Tools status API', function () {
+  afterEach(function () {
+    _setIsAvailableOverride(null);
+    setWebSearchAvailableOverride(null);
+  });
+
+  it('returns webSearchAvailable from /api/tools/status', async function () {
+    setWebSearchAvailableOverride(() => true);
+    const res = await request.get('/api/tools/status');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.webSearchAvailable, true);
+  });
+
+  it('returns webSearchAvailable false when no key', async function () {
+    setWebSearchAvailableOverride(() => false);
+    const res = await request.get('/api/tools/status');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.webSearchAvailable, false);
+  });
+});
+
+// ──────────────────────────────────────────────
 // Tool calling SSE pipeline
 // ──────────────────────────────────────────────
 
@@ -100,6 +158,8 @@ describe('Tool calling SSE pipeline', function () {
     _setChatStreamOverride(null);
     _setIsAvailableOverride(null);
     _setRunCodeOverride(null);
+    setWebSearchAvailableOverride(null);
+    _setSearchOverride(null);
   });
 
   it('streams toolCall and toolResult SSE events when tool is invoked', async function () {
@@ -108,21 +168,16 @@ describe('Tool calling SSE pipeline', function () {
     }
     this.timeout(15000);
 
-    // Mock container as available
     _setIsAvailableOverride(() => true);
     _setRunCodeOverride(async (language, code) => {
       return { stdout: '4\n', stderr: '', exitCode: 0, timedOut: false };
     });
 
-    // Mock chatStream to simulate the model calling run_code
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
       onTextChunk('Let me calculate. ');
-
-      // The model would call the function — simulate it
       if (functions && functions.run_code) {
-        const result = await functions.run_code.handler({ language: 'python', code: 'print(2+2)' });
+        await functions.run_code.handler({ language: 'python', code: 'print(2+2)' });
       }
-
       onTextChunk('The answer is 4.');
       return 'Let me calculate. The answer is 4.';
     });
@@ -139,40 +194,35 @@ describe('Tool calling SSE pipeline', function () {
       .map(e => { try { return JSON.parse(e); } catch { return null; } })
       .filter(Boolean);
 
-    // Should have token events
     const tokens = parsed.filter(e => e.token);
     assert.ok(tokens.length > 0, 'Should have token events');
 
-    // Should have a toolCall event
     const toolCalls = parsed.filter(e => e.toolCall);
     assert.strictEqual(toolCalls.length, 1, 'Should have exactly one toolCall event');
     assert.strictEqual(toolCalls[0].toolCall.name, 'run_code');
     assert.strictEqual(toolCalls[0].toolCall.language, 'python');
     assert.strictEqual(toolCalls[0].toolCall.code, 'print(2+2)');
 
-    // Should have a toolResult event
     const toolResults = parsed.filter(e => e.toolResult);
     assert.strictEqual(toolResults.length, 1, 'Should have exactly one toolResult event');
     assert.strictEqual(toolResults[0].toolResult.name, 'run_code');
     assert.strictEqual(toolResults[0].toolResult.output, '4\n');
     assert.strictEqual(toolResults[0].toolResult.exitCode, 0);
 
-    // Should end with [DONE]
     assert.ok(events.includes('[DONE]'), 'Stream should end with [DONE]');
   });
 
-  it('does not include tool events when container is unavailable', async function () {
+  it('does not include tool events when no tools available', async function () {
     if (!testModelId) {
       return this.skip();
     }
     this.timeout(15000);
 
-    // Mock container as NOT available
     _setIsAvailableOverride(() => false);
+    setWebSearchAvailableOverride(() => false);
 
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
-      // functions should be undefined when container is unavailable
-      assert.ok(!functions, 'functions should not be provided when container is unavailable');
+      assert.ok(!functions, 'functions should not be provided when no tools available');
       onTextChunk('No tools here.');
       return 'No tools here.';
     });
@@ -189,12 +239,8 @@ describe('Tool calling SSE pipeline', function () {
       .map(e => { try { return JSON.parse(e); } catch { return null; } })
       .filter(Boolean);
 
-    // Should NOT have any tool events
-    const toolCalls = parsed.filter(e => e.toolCall);
-    assert.strictEqual(toolCalls.length, 0, 'Should have no toolCall events');
-
-    const toolResults = parsed.filter(e => e.toolResult);
-    assert.strictEqual(toolResults.length, 0, 'Should have no toolResult events');
+    assert.strictEqual(parsed.filter(e => e.toolCall).length, 0);
+    assert.strictEqual(parsed.filter(e => e.toolResult).length, 0);
   });
 
   it('streams toolResult with error info when code execution fails', async function () {
@@ -204,7 +250,7 @@ describe('Tool calling SSE pipeline', function () {
     this.timeout(15000);
 
     _setIsAvailableOverride(() => true);
-    _setRunCodeOverride(async (language, code) => {
+    _setRunCodeOverride(async () => {
       return { stdout: '', stderr: 'SyntaxError: invalid syntax', exitCode: 1, timedOut: false };
     });
 
@@ -277,7 +323,6 @@ describe('Tool calling SSE pipeline', function () {
 
     let capturedMessages = null;
     _setChatStreamOverride(async (modelPath, messages, { onTextChunk }) => {
-      // Capture only the first call (the real message), not title generation
       if (!capturedMessages) {
         capturedMessages = messages;
       }
@@ -289,9 +334,7 @@ describe('Tool calling SSE pipeline', function () {
     await sseRequest(`/api/chats/${chat.id}/messages`)
       .send({ content: 'test' });
 
-    assert.ok(capturedMessages, 'Should have captured messages');
     const systemMsg = capturedMessages.find(m => m.role === 'system');
-    assert.ok(systemMsg, 'Should have a system message');
     assert.ok(systemMsg.content.includes('run_code'), 'System prompt should mention run_code tool');
   });
 
@@ -316,9 +359,139 @@ describe('Tool calling SSE pipeline', function () {
     await sseRequest(`/api/chats/${chat.id}/messages`)
       .send({ content: 'test' });
 
-    assert.ok(capturedMessages, 'Should have captured messages');
     const systemMsg = capturedMessages.find(m => m.role === 'system');
-    assert.ok(systemMsg, 'Should have a system message');
     assert.ok(!systemMsg.content.includes('run_code'), 'System prompt should NOT mention run_code tool');
+  });
+
+  // ──────────────────────────────────────────────
+  // Web search tool tests
+  // ──────────────────────────────────────────────
+
+  it('streams web_search toolCall and toolResult SSE events', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => false);
+    setWebSearchAvailableOverride(() => true);
+    _setSearchOverride(async (query) => ({
+      results: [
+        { title: 'Test Result', url: 'https://example.com', content: 'Test content here' }
+      ],
+      answer: 'This is a test answer'
+    }));
+
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      assert.ok(functions.web_search, 'Should have web_search function');
+      await functions.web_search.handler({ query: 'test query' });
+      onTextChunk('Search results returned.');
+      return 'Search results returned.';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    const res = await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'Search for something' });
+
+    assert.strictEqual(res.status, 200);
+    const events = parseSSE(res.body);
+    const parsed = events
+      .filter(e => e !== '[DONE]')
+      .map(e => { try { return JSON.parse(e); } catch { return null; } })
+      .filter(Boolean);
+
+    const toolCall = parsed.find(e => e.toolCall && e.toolCall.name === 'web_search');
+    assert.ok(toolCall, 'Should have a web_search toolCall event');
+    assert.strictEqual(toolCall.toolCall.query, 'test query');
+
+    const toolResult = parsed.find(e => e.toolResult && e.toolResult.name === 'web_search');
+    assert.ok(toolResult, 'Should have a web_search toolResult event');
+    assert.strictEqual(toolResult.toolResult.answer, 'This is a test answer');
+    assert.strictEqual(toolResult.toolResult.results.length, 1);
+    assert.strictEqual(toolResult.toolResult.results[0].title, 'Test Result');
+  });
+
+  it('does not offer web_search when unavailable', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => false);
+    setWebSearchAvailableOverride(() => false);
+
+    let receivedFunctions = 'not-set';
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      receivedFunctions = functions;
+      onTextChunk('Hello');
+      return 'Hello';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    assert.strictEqual(receivedFunctions, undefined, 'functions should be undefined when no tools available');
+  });
+
+  it('system prompt mentions web search when available', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => false);
+    setWebSearchAvailableOverride(() => true);
+    _setSearchOverride(async () => ({ results: [], answer: null }));
+
+    let capturedMessages = null;
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk }) => {
+      if (!capturedMessages) {
+        capturedMessages = messages;
+      }
+      onTextChunk('OK');
+      return 'OK';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    const systemMsg = capturedMessages.find(m => m.role === 'system');
+    assert.ok(systemMsg.content.includes('web_search'), 'System prompt should mention web_search');
+    assert.ok(!systemMsg.content.includes('run_code'), 'System prompt should not mention run_code');
+  });
+
+  it('offers both tools when both are available', async function () {
+    if (!testModelId) {
+      return this.skip();
+    }
+    this.timeout(15000);
+
+    _setIsAvailableOverride(() => true);
+    setWebSearchAvailableOverride(() => true);
+    _setSearchOverride(async () => ({ results: [], answer: null }));
+
+    let capturedMessages = null;
+    let capturedFunctions = null;
+    _setChatStreamOverride(async (modelPath, messages, { onTextChunk, functions }) => {
+      if (!capturedMessages) {
+        capturedMessages = messages;
+        capturedFunctions = functions;
+      }
+      onTextChunk('OK');
+      return 'OK';
+    });
+
+    const chat = (await request.post('/api/chats').send({})).body;
+    await sseRequest(`/api/chats/${chat.id}/messages`)
+      .send({ content: 'test' });
+
+    const systemMsg = capturedMessages.find(m => m.role === 'system');
+    assert.ok(systemMsg.content.includes('web_search'), 'System prompt should mention web_search');
+    assert.ok(systemMsg.content.includes('run_code'), 'System prompt should mention run_code');
+    assert.ok(capturedFunctions, 'Functions should be provided');
+    assert.ok(capturedFunctions.run_code, 'Should have run_code function');
+    assert.ok(capturedFunctions.web_search, 'Should have web_search function');
   });
 });

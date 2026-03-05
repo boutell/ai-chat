@@ -1,13 +1,18 @@
 import { defineChatSessionFunction } from 'node-llama-cpp';
-import { runCode, isAvailable } from './container.js';
+import { runCode, isAvailable as isContainerAvailable } from './container.js';
+import { search as webSearch, isAvailable as isWebSearchAvailable } from './web-search.js';
 
 export async function getChatFunctions(onToolEvent) {
-  if (!await isAvailable()) {
+  const functions = {};
+  const containerAvailable = await isContainerAvailable();
+  const webSearchAvailable = isWebSearchAvailable();
+
+  if (!containerAvailable && !webSearchAvailable) {
     return null;
   }
 
-  return {
-    run_code: defineChatSessionFunction({
+  if (containerAvailable) {
+    functions.run_code = defineChatSessionFunction({
       description: 'Run code in a sandboxed container and return the output. Available languages: python, javascript, bash. The container has no network access.',
       params: {
         type: 'object',
@@ -61,8 +66,68 @@ export async function getChatFunctions(onToolEvent) {
         }
         return response;
       }
-    })
-  };
+    });
+  }
+
+  if (webSearchAvailable) {
+    functions.web_search = defineChatSessionFunction({
+      description: 'Search the web for current information, news, facts, or data',
+      params: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string'
+          }
+        }
+      },
+      async handler({ query }) {
+        if (onToolEvent) {
+          onToolEvent({ type: 'toolCall', name: 'web_search', query });
+        }
+
+        try {
+          const { results, answer } = await webSearch(query);
+
+          if (onToolEvent) {
+            onToolEvent({
+              type: 'toolResult',
+              name: 'web_search',
+              results,
+              answer
+            });
+          }
+
+          // Format for the model
+          let response = '';
+          if (answer) {
+            response += `Answer: ${answer}\n\n`;
+          }
+          if (results.length > 0) {
+            response += 'Sources:\n';
+            results.forEach((r, i) => {
+              response += `${i + 1}. ${r.title} - ${r.url}\n   ${r.content}\n`;
+            });
+          } else {
+            response = 'No results found.';
+          }
+          return response;
+        } catch (err) {
+          if (onToolEvent) {
+            onToolEvent({
+              type: 'toolResult',
+              name: 'web_search',
+              results: [],
+              answer: null,
+              error: err.message
+            });
+          }
+          return `Search failed: ${err.message}`;
+        }
+      }
+    });
+  }
+
+  return functions;
 }
 
 function filterContainerNoise(stderr) {
