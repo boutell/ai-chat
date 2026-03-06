@@ -56,7 +56,7 @@ export const useChatStore = defineStore('chat', () => {
 
     // Add placeholder for assistant — must reference through the reactive
     // array so Vue tracks mutations to .content for rendering
-    currentMessages.value.push({ role: 'assistant', content: '', toolCalls: [] });
+    currentMessages.value.push({ role: 'assistant', content: '', code: '', phase: '' });
     const assistantMsg = currentMessages.value[currentMessages.value.length - 1];
     streaming.value = true;
     stoppedByUser.value = false;
@@ -87,25 +87,27 @@ export const useChatStore = defineStore('chat', () => {
             try {
               const json = JSON.parse(data);
               if (json.token) {
+                // Plain chat mode
                 assistantMsg.content += json.token;
               }
-              if (json.toolCall) {
-                assistantMsg.toolCalls.push({
-                  ...json.toolCall,
-                  result: null
-                });
+              if (json.phase) {
+                assistantMsg.phase = json.phase;
               }
-              if (json.toolResult) {
-                // Update the most recent matching tool call with its result
-                for (let j = assistantMsg.toolCalls.length - 1; j >= 0; j--) {
-                  if (assistantMsg.toolCalls[j].name === json.toolResult.name && !assistantMsg.toolCalls[j].result) {
-                    assistantMsg.toolCalls[j].result = json.toolResult;
-                    break;
+              if (json.codeToken) {
+                assistantMsg.code += json.codeToken;
+              }
+              if (json.result) {
+                assistantMsg.code = json.result.code;
+                let content = json.result.output || '';
+                if (json.result.stderr) {
+                  if (content) {
+                    content += '\n';
                   }
+                  content += json.result.stderr;
                 }
-              }
-              if (json.inject) {
-                assistantMsg.content += json.inject;
+                assistantMsg.content = content || '(no output)';
+                assistantMsg.exitCode = json.result.exitCode;
+                assistantMsg.phase = 'done';
               }
               if (json.error) {
                 assistantMsg.content += `\n\n**Error:** ${json.error}`;

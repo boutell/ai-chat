@@ -7,96 +7,42 @@
       variant="flat"
     >
       <v-card-text class="pa-3">
-        <!-- Tool calls display -->
-        <v-expansion-panels
-          v-if="message.toolCalls && message.toolCalls.length"
-          variant="accordion"
-          class="mb-2 tool-calls"
+        <!-- Phase indicator for code-first mode -->
+        <div
+          v-if="message.phase && message.phase !== 'done' && !message.content"
+          class="d-flex align-center mb-2"
         >
-          <v-expansion-panel
-            v-for="(tc, idx) in message.toolCalls"
-            :key="idx"
-          >
-            <!-- run_code tool -->
-            <template v-if="tc.name === 'run_code'">
-              <v-expansion-panel-title>
-                <v-icon size="small" class="mr-2">mdi-code-braces</v-icon>
-                <span>Ran {{ languageLabel(tc.language) }} code</span>
-                <v-chip
-                  v-if="tc.result && tc.result.exitCode !== 0"
-                  size="x-small"
-                  color="error"
-                  class="ml-2"
-                >
-                  exit {{ tc.result.exitCode }}
-                </v-chip>
-                <v-chip
-                  v-if="tc.result && tc.result.timedOut"
-                  size="x-small"
-                  color="warning"
-                  class="ml-2"
-                >
-                  timed out
-                </v-chip>
-                <v-progress-circular
-                  v-if="!tc.result"
-                  size="16"
-                  width="2"
-                  indeterminate
-                  class="ml-2"
-                />
-              </v-expansion-panel-title>
-              <v-expansion-panel-text>
-                <div class="tool-code mb-2">
-                  <div class="text-caption text-medium-emphasis mb-1">Code</div>
-                  <pre class="hljs pa-2 rounded"><code>{{ tc.code }}</code></pre>
-                </div>
-                <div v-if="tc.result" class="tool-output">
-                  <div v-if="tc.result.output" class="mb-1">
-                    <div class="text-caption text-medium-emphasis mb-1">Output</div>
-                    <pre class="tool-stdout pa-2 rounded">{{ tc.result.output }}</pre>
-                  </div>
-                  <div v-if="tc.result.stderr">
-                    <div class="text-caption text-medium-emphasis mb-1">Stderr</div>
-                    <pre class="tool-stderr pa-2 rounded">{{ tc.result.stderr }}</pre>
-                  </div>
-                </div>
-              </v-expansion-panel-text>
-            </template>
+          <v-progress-circular
+            size="16"
+            width="2"
+            indeterminate
+            class="mr-2"
+          />
+          <span class="text-medium-emphasis">{{ phaseLabel }}</span>
+        </div>
 
-            <!-- web_search tool -->
-            <template v-else-if="tc.name === 'web_search'">
-              <v-expansion-panel-title>
-                <v-icon size="small" class="mr-2">mdi-magnify</v-icon>
-                <span>Searched the web</span>
-                <span class="text-medium-emphasis ml-2" style="font-size: 0.85em;">{{ tc.query }}</span>
-                <v-progress-circular
-                  v-if="!tc.result"
-                  size="16"
-                  width="2"
-                  indeterminate
-                  class="ml-2"
-                />
-              </v-expansion-panel-title>
-              <v-expansion-panel-text>
-                <div v-if="tc.result">
-                  <div v-if="tc.result.answer" class="mb-3">
-                    <div class="text-caption text-medium-emphasis mb-1">Answer</div>
-                    <div>{{ tc.result.answer }}</div>
-                  </div>
-                  <div v-if="tc.result.results && tc.result.results.length" class="search-results">
-                    <div class="text-caption text-medium-emphasis mb-1">Sources</div>
-                    <div v-for="(r, i) in tc.result.results" :key="i" class="search-result mb-2">
-                      <a :href="r.url" target="_blank" rel="noopener noreferrer" class="search-result-link">{{ r.title || r.url }}</a>
-                      <div class="text-medium-emphasis" style="font-size: 0.85em;">{{ r.content }}</div>
-                    </div>
-                  </div>
-                  <div v-if="!tc.result.results || !tc.result.results.length" class="text-medium-emphasis">
-                    No results found.
-                  </div>
-                </div>
-              </v-expansion-panel-text>
-            </template>
+        <!-- Code panel (collapsible) -->
+        <v-expansion-panels
+          v-if="message.code"
+          variant="accordion"
+          class="mb-2 code-panel"
+        >
+          <v-expansion-panel>
+            <v-expansion-panel-title>
+              <v-icon size="small" class="mr-2">mdi-code-braces</v-icon>
+              <span>View code</span>
+              <v-chip
+                v-if="message.exitCode != null && message.exitCode !== 0"
+                size="x-small"
+                color="error"
+                class="ml-2"
+              >
+                exit {{ message.exitCode }}
+              </v-chip>
+            </v-expansion-panel-title>
+            <v-expansion-panel-text>
+              <pre class="hljs pa-2 rounded"><code>{{ message.code }}</code></pre>
+            </v-expansion-panel-text>
           </v-expansion-panel>
         </v-expansion-panels>
 
@@ -107,7 +53,7 @@
         />
         <div v-else class="user-text">{{ message.content }}</div>
         <v-progress-linear
-          v-if="streaming && !message.content"
+          v-if="streaming && !message.content && !message.phase"
           indeterminate
           color="primary"
           class="mt-2"
@@ -144,15 +90,15 @@ const md = new MarkdownIt({
   }
 });
 
-const LANG_LABELS = {
-  python: 'Python',
-  javascript: 'JavaScript',
-  bash: 'Bash'
+const PHASE_LABELS = {
+  generating: 'Writing code...',
+  running: 'Running...',
+  retrying: 'Retrying...'
 };
 
-function languageLabel(lang) {
-  return LANG_LABELS[lang] || lang;
-}
+const phaseLabel = computed(() => {
+  return PHASE_LABELS[props.message.phase] || '';
+});
 
 const renderedContent = computed(() => {
   let html = md.render(props.message.content || '');
@@ -183,37 +129,15 @@ const renderedContent = computed(() => {
   white-space: pre-wrap;
 }
 
-.tool-calls {
+.code-panel {
   font-size: 0.875rem;
 }
 
-.tool-code pre,
-.tool-stdout,
-.tool-stderr {
+.code-panel pre {
   font-size: 0.8125rem;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.tool-stdout {
-  background: rgba(255, 255, 255, 0.05);
-  color: rgb(var(--v-theme-on-surface));
-}
-
-.tool-stderr {
-  background: rgba(255, 152, 0, 0.1);
-  color: rgb(var(--v-theme-warning));
-}
-
-.search-result-link {
-  color: rgb(var(--v-theme-primary));
-  text-decoration: none;
-  font-weight: 500;
-}
-
-.search-result-link:hover {
-  text-decoration: underline;
 }
 
 .markdown-body :deep(pre) {

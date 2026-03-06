@@ -1,9 +1,15 @@
 import db from '../db.js';
 import { getSelectedModelPath } from '../lib/model-selector.js';
 import { chatStream, chatComplete } from '../lib/llm.js';
-import { getChatFunctions } from '../lib/tools.js';
-import { isAvailable as isContainerAvailable } from '../lib/container.js';
-import { isAvailable as isWebSearchAvailable } from '../lib/web-search.js';
+import { isAvailable as isContainerAvailable, runCode } from '../lib/container.js';
+
+function extractPython(text) {
+  const fenceMatch = text.match(/```(?:python)?\s*\n([\s\S]*?)```/);
+  if (fenceMatch) {
+    return fenceMatch[1].trim();
+  }
+  return text.trim();
+}
 
 async function chatsPlugin(fastify, opts) {
   // List all chats (most recent first)
@@ -95,21 +101,13 @@ async function chatsPlugin(fastify, opts) {
     // Build message history
     const messages = db.prepare('SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at ASC').all(request.params.id);
 
-    const now = new Date();
-    const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
     const containerAvailable = await isContainerAvailable();
-    const webSearchAvailable = isWebSearchAvailable();
-    let systemContent = `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`;
+
+    let systemContent;
     if (containerAvailable) {
-      systemContent += `
-You have a run_code tool that runs Python code in a sandbox. Use it for any math, calculations, or data processing. The output of the script is automatically shown to the user, so do not repeat it in your response. Just comment on the results.
-Rules:
-- Always use print() for output. Code runs as a script, not a REPL — bare expressions produce no output.
-- Write complete, self-contained scripts. Each call starts fresh with no memory of previous calls.
-- Only use built-in Python modules. Do NOT import third-party packages (no pandas, numpy, matplotlib, requests, etc.).`;
-    }
-    if (webSearchAvailable) {
-      systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
+      systemContent = 'Generate a Python program to answer the user\'s prompt. The Python program should print its response, not return it. Do not output anything else. There is no display or GUI. All output must be printed as text. Available packages: numpy, pandas, sympy, scipy, beautifulsoup4, requests, and all Python standard library modules.';
+    } else {
+      systemContent = 'You are a helpful AI assistant.';
     }
     const systemMessage = { role: 'system', content: systemContent };
 
@@ -136,48 +134,16 @@ Rules:
     });
 
     try {
-      let fullResponse = '';
+      if (containerAvailable) {
+        // Code-first path: model generates Python, we run it
+        await codeFirstPath(res, systemMessage, messages, modelPath, abortController, () => clientDisconnected);
+      } else {
+        // Plain chat path: regular streaming
+        await plainChatPath(res, systemMessage, messages, modelPath, abortController, () => clientDisconnected);
+      }
 
-      // Set up tool functions if any tools are available
-      const onToolEvent = (event) => {
-        if (clientDisconnected) {
-          return;
-        }
-        if (event.type === 'toolCall') {
-          if (event.name === 'run_code') {
-            res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, language: event.language, code: event.code } })}\n\n`);
-          } else if (event.name === 'web_search') {
-            res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, query: event.query } })}\n\n`);
-          }
-        } else if (event.type === 'toolResult') {
-          if (event.name === 'run_code') {
-            res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, output: event.output, stderr: event.stderr, exitCode: event.exitCode, timedOut: event.timedOut } })}\n\n`);
-            // Auto-inject output into the assistant message so the user sees it inline
-            const output = event.output || event.stderr || '';
-            if (output.trim()) {
-              const inject = '\n```\n' + output.trimEnd() + '\n```\n';
-              fullResponse += inject;
-              res.write(`data: ${JSON.stringify({ inject })}\n\n`);
-            }
-          } else if (event.name === 'web_search') {
-            res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, results: event.results, answer: event.answer } })}\n\n`);
-          }
-        }
-      };
-      const functions = (containerAvailable || webSearchAvailable) ? await getChatFunctions(onToolEvent) : undefined;
-
-      await chatStream(modelPath, [systemMessage, ...messages], {
-        onTextChunk: (chunk) => {
-          if (!clientDisconnected) {
-            fullResponse += chunk;
-            res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
-          }
-        },
-        signal: abortController.signal,
-        functions
-      });
-
-      // Save the complete response
+      // Save the response
+      const fullResponse = res._codeFirstOutput || res._plainChatOutput || '';
       db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
       db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
 
@@ -202,6 +168,93 @@ Rules:
   });
 }
 
+const MAX_RETRIES = 2;
+
+async function codeFirstPath(res, systemMessage, messages, modelPath, abortController, isDisconnected) {
+  let retries = 0;
+  let conversationMessages = [systemMessage, ...messages];
+
+  while (retries <= MAX_RETRIES) {
+    // Signal phase
+    if (!isDisconnected()) {
+      const phase = retries === 0 ? 'generating' : 'retrying';
+      res.write(`data: ${JSON.stringify({ phase })}\n\n`);
+    }
+
+    // Collect the model's full response (which should be Python code)
+    let fullResponse = '';
+    await chatStream(modelPath, conversationMessages, {
+      onTextChunk: (chunk) => {
+        if (!isDisconnected()) {
+          fullResponse += chunk;
+          res.write(`data: ${JSON.stringify({ codeToken: chunk })}\n\n`);
+        }
+      },
+      signal: abortController.signal
+    });
+
+    const code = extractPython(fullResponse);
+
+    // Run the code
+    if (!isDisconnected()) {
+      res.write(`data: ${JSON.stringify({ phase: 'running' })}\n\n`);
+    }
+
+    const result = await runCode('python', code);
+    const hasError = result.exitCode !== 0;
+
+    if (hasError && retries < MAX_RETRIES) {
+      // Retry: add the error as context and loop
+      retries++;
+      const stderr = result.stderr || '(no output)';
+      let errorFeedback = `The code produced an error:\n${stderr}\n`;
+      if (stderr.includes('ModuleNotFoundError') || stderr.includes('ImportError')) {
+        errorFeedback += 'That module is not installed. Do not use it. Use only print() and built-in Python modules. Generate the corrected Python program.';
+      } else {
+        errorFeedback += 'Please fix the code and try again. Generate only the corrected Python program.';
+      }
+      conversationMessages = [
+        ...conversationMessages,
+        { role: 'assistant', content: fullResponse },
+        { role: 'user', content: errorFeedback }
+      ];
+      continue;
+    }
+
+    // Send final result
+    if (!isDisconnected()) {
+      res.write(`data: ${JSON.stringify({
+        result: {
+          code,
+          output: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode
+        }
+      })}\n\n`);
+    }
+
+    // The visible response is the program's printed output
+    res._codeFirstOutput = result.stdout || result.stderr || '';
+    return;
+  }
+}
+
+async function plainChatPath(res, systemMessage, messages, modelPath, abortController, isDisconnected) {
+  let fullResponse = '';
+
+  await chatStream(modelPath, [systemMessage, ...messages], {
+    onTextChunk: (chunk) => {
+      if (!isDisconnected()) {
+        fullResponse += chunk;
+        res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
+      }
+    },
+    signal: abortController.signal
+  });
+
+  res._plainChatOutput = fullResponse;
+}
+
 // Auto-generate chat title (fire-and-forget)
 async function generateTitle(chatId, userMessage, assistantMessage, modelPath) {
   try {
@@ -223,4 +276,5 @@ async function generateTitle(chatId, userMessage, assistantMessage, modelPath) {
   }
 }
 
+export { extractPython };
 export default chatsPlugin;

@@ -1,4 +1,4 @@
-import { getLlama, LlamaChatSession, resolveModelFile } from 'node-llama-cpp';
+import { getLlama, LlamaChatSession, resolveChatWrapper, resolveModelFile } from 'node-llama-cpp';
 import envPaths from 'env-paths';
 import { existsSync, mkdirSync, readdirSync } from 'fs';
 import path from 'path';
@@ -67,9 +67,16 @@ export async function chatStream(modelPath, messages, { onTextChunk, signal, fun
     const systemPrompt = messages.find(m => m.role === 'system')?.content || '';
     const chatMessages = messages.filter(m => m.role !== 'system');
 
+    const chatWrapper = resolveChatWrapper(model, {
+      customWrapperSettings: {
+        qwen: { thoughts: 'discourage' }
+      }
+    });
+
     const session = new LlamaChatSession({
       contextSequence: context.getSequence(),
-      systemPrompt
+      systemPrompt,
+      chatWrapper
     });
 
     // Load prior chat history (all but the last user message)
@@ -97,6 +104,18 @@ export async function chatStream(modelPath, messages, { onTextChunk, signal, fun
     if (functions) {
       promptOptions.functions = functions;
     }
+
+    // Log exact LLM input for debugging
+    console.log('--- LLM INPUT ---');
+    console.log('Chat wrapper:', chatWrapper?.wrapperName || chatWrapper?.constructor?.name || 'unknown');
+    console.log('Context size:', context.contextSize);
+    console.log('System prompt:', JSON.stringify(systemPrompt));
+    console.log('System prompt tokens:', model.tokenize(systemPrompt).length);
+    console.log('History entries:', history.length);
+    console.log('User message:', JSON.stringify(lastUserMessage).slice(0, 500));
+    console.log('User message tokens:', model.tokenize(lastUserMessage).length);
+    console.log('Functions:', functions ? Object.keys(functions).join(', ') : 'none');
+    console.log('--- END LLM INPUT ---');
 
     const response = await session.prompt(lastUserMessage, promptOptions);
 

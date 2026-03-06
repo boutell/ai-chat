@@ -2,12 +2,19 @@ import { execFile, spawn } from 'child_process';
 import { writeFile, unlink, mkdtemp } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const CUSTOM_PYTHON_IMAGE = 'ai-chat-python-sandbox';
 
 const IMAGES = {
-  python: 'docker.io/library/python:3-slim',
+  python: CUSTOM_PYTHON_IMAGE,
   javascript: 'docker.io/library/node:22-slim',
   bash: 'docker.io/library/bash:5'
 };
+
+let pythonImageReady = false;
 
 let runtime = null;
 let detected = false;
@@ -85,6 +92,31 @@ function execPromise(cmd, args, timeout = 10000) {
   });
 }
 
+async function ensurePythonImage() {
+  if (pythonImageReady || !runtime) {
+    return;
+  }
+  // Check if image already exists
+  try {
+    await execPromise(runtime, ['image', 'inspect', CUSTOM_PYTHON_IMAGE], 10000);
+    pythonImageReady = true;
+    return;
+  } catch {
+    // Image doesn't exist, build it
+  }
+  console.log('Building custom Python sandbox image...');
+  const dockerfilePath = path.join(__dirname, '..', 'Dockerfile.python-sandbox');
+  try {
+    await execPromise(runtime, ['build', '-t', CUSTOM_PYTHON_IMAGE, '-f', dockerfilePath, path.join(__dirname, '..')], 300000);
+    pythonImageReady = true;
+    console.log('Python sandbox image built successfully.');
+  } catch (err) {
+    console.warn('Failed to build custom Python image, falling back to python:3-slim:', err.message);
+    IMAGES.python = 'docker.io/library/python:3-slim';
+    pythonImageReady = true;
+  }
+}
+
 export async function isAvailable() {
   if (isAvailableOverride) {
     return isAvailableOverride();
@@ -106,6 +138,9 @@ export async function runCode(language, code, { timeout = 30000 } = {}) {
   await detectRuntime();
   if (!runtime) {
     return { stdout: '', stderr: 'No container runtime available', exitCode: 1, timedOut: false };
+  }
+  if (language === 'python') {
+    await ensurePythonImage();
   }
 
   const config = LANG_CONFIG[language];
