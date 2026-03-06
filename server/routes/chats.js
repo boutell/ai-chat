@@ -1,15 +1,9 @@
 import db from '../db.js';
 import { getSelectedModelPath } from '../lib/model-selector.js';
 import { chatStream, chatComplete } from '../lib/llm.js';
-import { isAvailable as isContainerAvailable, runCode } from '../lib/container.js';
-
-function extractPython(text) {
-  const fenceMatch = text.match(/```(?:python)?\s*\n([\s\S]*?)```/);
-  if (fenceMatch) {
-    return fenceMatch[1].trim();
-  }
-  return text.trim();
-}
+import { getChatFunctions } from '../lib/tools.js';
+import { isAvailable as isContainerAvailable } from '../lib/container.js';
+import { isAvailable as isWebSearchAvailable } from '../lib/web-search.js';
 
 async function chatsPlugin(fastify, opts) {
   // List all chats (most recent first)
@@ -101,13 +95,24 @@ async function chatsPlugin(fastify, opts) {
     // Build message history
     const messages = db.prepare('SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at ASC').all(request.params.id);
 
+    const now = new Date();
+    const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'long' });
     const containerAvailable = await isContainerAvailable();
-
-    let systemContent;
+    const webSearchAvailable = isWebSearchAvailable();
+    let systemContent = `You are a helpful AI assistant. The day of the week is ${dayOfWeek}. The current date and time is ${now.toLocaleString()}. Be concise and helpful.`;
     if (containerAvailable) {
-      systemContent = 'Generate a Python program to answer the user\'s prompt. The Python program should print its response, not return it. Do not output anything else. There is no display or GUI. All output must be printed as text. Available packages: numpy, pandas, sympy, scipy, beautifulsoup4, requests, and all Python standard library modules.';
-    } else {
-      systemContent = 'You are a helpful AI assistant.';
+      systemContent += `
+You have access to a run_code tool that executes code in a sandboxed container. ALWAYS use it for any math beyond trivial arithmetic — multiplication, division, exponents, algebra, unit conversions, etc. Never guess at calculations. Also use it for data processing, code verification, or any task where running code would produce a more accurate answer. Available languages: python, javascript, bash. The container has no network access.
+Rules for generated code:
+- Code MUST print all output to the console (use print() in Python, console.log() in JavaScript, echo in bash). Code runs as a script, not a REPL — bare expressions produce no output.
+- Solve the entire problem in a SINGLE tool call whenever possible. For example, if asked to calculate totals AND draw a chart, do both in one script, not two separate calls.
+- Only built-in standard library modules are available. Do NOT import third-party packages (no pandas, numpy, matplotlib, requests, etc.). Use only modules that ship with Python, Node.js, or bash.`;
+    }
+    if (webSearchAvailable) {
+      systemContent += '\nYou have access to a web_search tool for looking up current information, facts, news, or anything you\'re unsure about. Use it when the question involves recent events, specific data you might not know, or when accuracy matters.';
+    }
+    if (containerAvailable || webSearchAvailable) {
+      systemContent += '\nIMPORTANT: After running code, ALWAYS use show_output to display the results to the user. NEVER copy, retype, or recreate tool output in your response — that is slow and error-prone. Instead, call show_output with format "code" and then add your commentary. This applies to ALL tool output: calculations, tables, charts, ASCII art, data, etc. The show_output tool displays results instantly and perfectly.';
     }
     const systemMessage = { role: 'system', content: systemContent };
 
@@ -134,16 +139,44 @@ async function chatsPlugin(fastify, opts) {
     });
 
     try {
-      if (containerAvailable) {
-        // Code-first path: model generates Python, we run it
-        await codeFirstPath(res, systemMessage, messages, modelPath, abortController, () => clientDisconnected);
-      } else {
-        // Plain chat path: regular streaming
-        await plainChatPath(res, systemMessage, messages, modelPath, abortController, () => clientDisconnected);
-      }
+      let fullResponse = '';
 
-      // Save the response
-      const fullResponse = res._codeFirstOutput || res._plainChatOutput || '';
+      // Set up tool functions if any tools are available
+      const onToolEvent = (event) => {
+        if (clientDisconnected) {
+          return;
+        }
+        if (event.type === 'toolCall') {
+          if (event.name === 'run_code') {
+            res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, language: event.language, code: event.code } })}\n\n`);
+          } else if (event.name === 'web_search') {
+            res.write(`data: ${JSON.stringify({ toolCall: { name: event.name, query: event.query } })}\n\n`);
+          }
+        } else if (event.type === 'toolResult') {
+          if (event.name === 'run_code') {
+            res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, output: event.output, stderr: event.stderr, exitCode: event.exitCode, timedOut: event.timedOut } })}\n\n`);
+          } else if (event.name === 'web_search') {
+            res.write(`data: ${JSON.stringify({ toolResult: { name: event.name, results: event.results, answer: event.answer } })}\n\n`);
+          }
+        } else if (event.type === 'inject') {
+          fullResponse += event.text;
+          res.write(`data: ${JSON.stringify({ inject: event.text })}\n\n`);
+        }
+      };
+      const functions = (containerAvailable || webSearchAvailable) ? await getChatFunctions(onToolEvent) : undefined;
+
+      await chatStream(modelPath, [systemMessage, ...messages], {
+        onTextChunk: (chunk) => {
+          if (!clientDisconnected) {
+            fullResponse += chunk;
+            res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
+          }
+        },
+        signal: abortController.signal,
+        functions
+      });
+
+      // Save the complete response
       db.prepare('INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)').run(request.params.id, 'assistant', fullResponse);
       db.prepare('UPDATE chats SET updated_at = datetime(\'now\') WHERE id = ?').run(request.params.id);
 
@@ -168,93 +201,6 @@ async function chatsPlugin(fastify, opts) {
   });
 }
 
-const MAX_RETRIES = 2;
-
-async function codeFirstPath(res, systemMessage, messages, modelPath, abortController, isDisconnected) {
-  let retries = 0;
-  let conversationMessages = [systemMessage, ...messages];
-
-  while (retries <= MAX_RETRIES) {
-    // Signal phase
-    if (!isDisconnected()) {
-      const phase = retries === 0 ? 'generating' : 'retrying';
-      res.write(`data: ${JSON.stringify({ phase })}\n\n`);
-    }
-
-    // Collect the model's full response (which should be Python code)
-    let fullResponse = '';
-    await chatStream(modelPath, conversationMessages, {
-      onTextChunk: (chunk) => {
-        if (!isDisconnected()) {
-          fullResponse += chunk;
-          res.write(`data: ${JSON.stringify({ codeToken: chunk })}\n\n`);
-        }
-      },
-      signal: abortController.signal
-    });
-
-    const code = extractPython(fullResponse);
-
-    // Run the code
-    if (!isDisconnected()) {
-      res.write(`data: ${JSON.stringify({ phase: 'running' })}\n\n`);
-    }
-
-    const result = await runCode('python', code);
-    const hasError = result.exitCode !== 0;
-
-    if (hasError && retries < MAX_RETRIES) {
-      // Retry: add the error as context and loop
-      retries++;
-      const stderr = result.stderr || '(no output)';
-      let errorFeedback = `The code produced an error:\n${stderr}\n`;
-      if (stderr.includes('ModuleNotFoundError') || stderr.includes('ImportError')) {
-        errorFeedback += 'That module is not installed. Do not use it. Use only print() and built-in Python modules. Generate the corrected Python program.';
-      } else {
-        errorFeedback += 'Please fix the code and try again. Generate only the corrected Python program.';
-      }
-      conversationMessages = [
-        ...conversationMessages,
-        { role: 'assistant', content: fullResponse },
-        { role: 'user', content: errorFeedback }
-      ];
-      continue;
-    }
-
-    // Send final result
-    if (!isDisconnected()) {
-      res.write(`data: ${JSON.stringify({
-        result: {
-          code,
-          output: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode
-        }
-      })}\n\n`);
-    }
-
-    // The visible response is the program's printed output
-    res._codeFirstOutput = result.stdout || result.stderr || '';
-    return;
-  }
-}
-
-async function plainChatPath(res, systemMessage, messages, modelPath, abortController, isDisconnected) {
-  let fullResponse = '';
-
-  await chatStream(modelPath, [systemMessage, ...messages], {
-    onTextChunk: (chunk) => {
-      if (!isDisconnected()) {
-        fullResponse += chunk;
-        res.write(`data: ${JSON.stringify({ token: chunk })}\n\n`);
-      }
-    },
-    signal: abortController.signal
-  });
-
-  res._plainChatOutput = fullResponse;
-}
-
 // Auto-generate chat title (fire-and-forget)
 async function generateTitle(chatId, userMessage, assistantMessage, modelPath) {
   try {
@@ -276,5 +222,4 @@ async function generateTitle(chatId, userMessage, assistantMessage, modelPath) {
   }
 }
 
-export { extractPython };
 export default chatsPlugin;

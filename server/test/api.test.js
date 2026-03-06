@@ -209,28 +209,17 @@ describe('Message streaming (POST /api/chats/:id/messages)', function () {
 
     const events = parseSSE(res.body);
 
-    // Must have a [DONE] terminator
+    // Must have token events and a [DONE] terminator
     assert.ok(events.includes('[DONE]'), 'Stream should end with [DONE]');
 
-    const parsed = events
+    const tokens = events
       .filter(e => e !== '[DONE]')
       .map(e => { try { return JSON.parse(e); } catch { return null; } })
-      .filter(Boolean);
+      .filter(e => e && e.token);
+    assert.ok(tokens.length > 0, 'Should have received token events');
 
-    // Two paths: code-first (codeToken + result) or plain chat (token)
-    const tokens = parsed.filter(e => e.token);
-    const codeTokens = parsed.filter(e => e.codeToken);
-    const results = parsed.filter(e => e.result);
-    assert.ok(tokens.length > 0 || codeTokens.length > 0, 'Should have received token or codeToken events');
-
-    let fullText;
-    if (results.length > 0) {
-      // Code-first path: output is in result
-      fullText = results[0].result.output || results[0].result.stderr || '';
-    } else {
-      // Plain chat path
-      fullText = tokens.map(t => t.token).join('');
-    }
+    // Full response should be concatenated tokens
+    const fullText = tokens.map(t => t.token).join('');
     assert.ok(fullText.length > 0, `Expected non-empty response, got: "${fullText}"`);
 
     // Verify DB persistence
@@ -239,7 +228,7 @@ describe('Message streaming (POST /api/chats/:id/messages)', function () {
     assert.strictEqual(messages[0].role, 'user');
     assert.strictEqual(messages[0].content, 'Reply with exactly the word "hello" and nothing else.');
     assert.strictEqual(messages[1].role, 'assistant');
-    assert.ok(messages[1].content.length > 0, 'Assistant message should be non-empty');
+    assert.strictEqual(messages[1].content, fullText);
   });
 
   it('returns 404 for nonexistent chat', async function () {

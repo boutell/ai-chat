@@ -105,18 +105,6 @@ export async function chatStream(modelPath, messages, { onTextChunk, signal, fun
       promptOptions.functions = functions;
     }
 
-    // Log exact LLM input for debugging
-    console.log('--- LLM INPUT ---');
-    console.log('Chat wrapper:', chatWrapper?.wrapperName || chatWrapper?.constructor?.name || 'unknown');
-    console.log('Context size:', context.contextSize);
-    console.log('System prompt:', JSON.stringify(systemPrompt));
-    console.log('System prompt tokens:', model.tokenize(systemPrompt).length);
-    console.log('History entries:', history.length);
-    console.log('User message:', JSON.stringify(lastUserMessage).slice(0, 500));
-    console.log('User message tokens:', model.tokenize(lastUserMessage).length);
-    console.log('Functions:', functions ? Object.keys(functions).join(', ') : 'none');
-    console.log('--- END LLM INPUT ---');
-
     const response = await session.prompt(lastUserMessage, promptOptions);
 
     return response;
